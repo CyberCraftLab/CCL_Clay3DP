@@ -1,0 +1,53 @@
+CCL_Clay3DP — Rhino 8 plugin for clay 3D printing
+Copyright 2026 CyberCraft Lab, OTH Regensburg, Prof. Christophe Barlieb
+
+This product includes software developed at the CyberCraft Lab,
+Ostbayerische Technische Hochschule (OTH) Regensburg.
+
+============================================================
+Third-party software used
+============================================================
+
+RhinoCommon
+  Copyright (c) Robert McNeel & Associates.
+  Licensed under the Rhino SDK terms available from
+  https://www.rhino3d.com/.
+  Used as the host API for the plugin (not redistributed with
+  this source).
+
+Newtonsoft.Json (Json.NET)
+  Copyright (c) 2007 James Newton-King.
+  Licensed under the MIT License.
+  https://github.com/JamesNK/Newtonsoft.Json/blob/master/LICENSE.md
+
+Eto.Forms
+  Copyright (c) 2012-present Curtis Wensley and contributors.
+  Licensed under the BSD 3-Clause License.
+  https://github.com/picoe/Eto/blob/develop/LICENSE.txt
+  (Shipped with Rhino 8.)
+
+============================================================
+Companion tooling (not part of this source distribution)
+============================================================
+
+RoboDK Python API (robolink, robomath)
+  Copyright (c) RoboDK Inc.
+  https://robodk.com/
+  Used at runtime by the CCL_Clay3DP plugin to populate a RoboDK
+  station. Not redistributed.
+
+KUKA CNC ISG post processor (customised)
+  Base version Copyright (c) 2020 RoboDK Inc., licensed under
+  the Apache License, Version 2.0. Site-specific modifications
+  by CyberCraft Lab, OTH Regensburg for the clay-extruder setup
+  (HSC BSPLINE scoping, tool-change emission, extruder lead
+  compensation). The modified post processor lives under
+  C:\RoboDK\Posts\ on the operator machine and is not part of
+  this repository.
+
+CyberCraft signet logo
+  "C" mark on black circle.
+  Copyright (c) CyberCraft Lab, OTH Regensburg. All rights
+  reserved. Redistribution of the logo as a trademark is
+  subject to the lab's approval; see the Apache License §6
+  ("Trademarks") for the general rule that applies here.

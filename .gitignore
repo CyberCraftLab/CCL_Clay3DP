@@ -1,0 +1,12 @@
+# Generated files
+output/
+*.pyc
+__pycache__/
+
+# .NET build artifacts
+bin/
+obj/
+
+# Personal tooling / non-public work
+.claude/
+Research/

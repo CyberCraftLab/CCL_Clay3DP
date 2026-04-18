@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <OutputType>Library</OutputType>
+    <AssemblyName>CCL_Clay3DP</AssemblyName>
+    <RootNamespace>CCL_Clay3DP</RootNamespace>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <!-- Versioning: alpha — not a release candidate, use at own risk -->
+    <Version>1.0.3-alpha</Version>
+    <AssemblyVersion>1.0.3.0</AssemblyVersion>
+    <FileVersion>1.0.3.0</FileVersion>
+    <InformationalVersion>1.0.3-alpha</InformationalVersion>
+    <!-- License and authorship metadata, baked into the assembly -->
+    <Product>CCL_Clay3DP</Product>
+    <Description>Rhino 8 plugin for clay 3D printing on a Kuka robot with a Stoneflower extruder. Alpha release — use at own risk.</Description>
+    <Company>CyberCraft Lab, OTH Regensburg</Company>
+    <Authors>Prof. Christophe Barlieb; CyberCraft Lab, OTH Regensburg</Authors>
+    <Copyright>Copyright 2026 CyberCraft Lab, OTH Regensburg, Prof. Christophe Barlieb</Copyright>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)' == 'Debug'">
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="RhinoCommon" Version="8.0.23304.9001" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="CC-logo\Monitor-Office-Cybercraft-Signet-Kreis_d-RGB-Schwarz.png">
+      <LogicalName>CCL_Clay3DP.CCLogo.png</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+
+</Project>

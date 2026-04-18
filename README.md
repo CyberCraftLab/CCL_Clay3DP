@@ -1,93 +1,313 @@
-# CCL_Clay3DP
+# CCL_Clay3DP — Rhino 8 Plugin for Clay 3D Printing
 
+**Version: Alpha 1.0.3 — NOT a release candidate. Use at your own risk.**
 
+> 🚧 This plugin is in **alpha**. It is actively used in the CCL lab but is
+> not feature-frozen, has not been independently audited, and is known to
+> have rough edges. Generated robot programs MUST be reviewed in RoboDK
+> simulation before running on real hardware. The authors assume no
+> liability for damage to robots, equipment, parts, or persons arising
+> from the use of this software (see the Apache-2.0 disclaimer of warranty
+> in [LICENSE](LICENSE) §7 and limitation of liability in §8).
 
-## Getting started
+A Rhino 8 plugin that takes a 3D part in Rhino, slices it into a spiral
+toolpath, checks its printability for clay, and sends it straight to RoboDK
+as a robot machining project — ready to run on a Kuka KR 10 R1100-2 with a
+Stoneflower clay extruder.
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+**One input, one output.** Pick a Rhino geometry, press a button, get a
+robot program. No intermediate STL / G-code files, no Cura, no manual
+configuration in RoboDK.
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+> ## ⚠ About this project
+>
+> **CCL_Clay3DP was developed at the CyberCraft Lab (CCL),
+> Ostbayerische Technische Hochschule (OTH) Regensburg, by
+> Prof. Christophe Barlieb, for use with the lab's specific hardware
+> setup (the CCL-ALTAR-01 cell).**
+>
+> It is therefore tightly coupled to that setup — named RoboDK frames
+> (`T10`, `T11`, `T12`, `BasePlate02`), a specific Kuka robot model,
+> a custom KUKA CNC ISG post processor, and the Stoneflower paste
+> extruder workflow. **It is not a general-purpose clay slicer.**
+>
+> The source is released publicly under the Apache License 2.0 so
+> that **other labs, workshops, and practitioners are welcome to fork
+> it and adapt it to their own hardware**. If you have a different
+> robot, TCP naming, post processor, or extruder, expect to rewrite
+> the bits of `RoboDK/RoboDKSubprocess.cs` and
+> `Models/RobotSettings.cs` that hard-code CCL's station topology —
+> the core spiral slicer, printability analyzer, and plugin
+> scaffolding should all carry over unchanged.
+>
+> Contributions, forks, and questions are welcome. Credit back to
+> the CyberCraft Lab and Prof. Barlieb is appreciated but not
+> legally required by the license.
 
-## Add your files
+## What it does
 
-* [Create](https://docs.gitlab.com/user/project/repository/web_editor/#create-a-file) or [upload](https://docs.gitlab.com/user/project/repository/web_editor/#upload-a-file) files
-* [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
+1. **Contour slicer** — slices the geometry with horizontal planes and
+   interpolates a continuous spiral between contours (vase mode, no Z-seam).
+2. **Printability analysis** — colors the geometry mesh in the viewport
+   with a red-yellow-green heatmap showing where clay printing is at risk
+   (overhang angles, layer bond, robot wrist velocity).
+3. **RoboDK integration** — opens the pre-configured `3DP_v0.4.rdk`
+   station, adds the spiral as a Curve Follow object under the build plate,
+   links it to the `3DP_Template` machining project, and regenerates the
+   robot program using the CYARC KUKA post processor.
+
+## Repository layout
 
 ```
-cd existing_repo
-git remote add origin https://gitlab.oth-regensburg.de/bac39641/ccl_clay3dp.git
-git branch -M main
-git push -uf origin main
+3DP/                          Repository root
+├─ CCL_Clay3DP/               C# Rhino 8 plugin source (the main product)
+├─ robodk_station/            RoboDK station template (3DP_v0.4.rdk)
+├─ 3DP.sln                    Visual Studio solution
+├─ LICENSE                    Apache License 2.0
+├─ NOTICE                     Third-party attributions
+└─ README.md                  This file
 ```
 
-## Integrate with your tools
+## Plugin structure
 
-* [Set up project integrations](https://gitlab.oth-regensburg.de/bac39641/ccl_clay3dp/-/settings/integrations)
+```
+CCL_Clay3DP/
+├─ CCL_Clay3DP.csproj           .NET Framework 4.8 build config
+├─ CCL_Clay3DPPluginInfo.cs     Plugin + panel registration
+├─ CC-logo/                     CyberCraft signet logo (embedded resource)
+├─ G-Code_Proofing/             Reference .nc output used to validate posts
+├─ Commands/
+│  └─ CCL_Clay3DPCommand.cs     Rhino command that toggles the panel
+├─ UI/
+│  ├─ CCL_Clay3DPPanel.cs       Dockable Eto.Forms panel
+│  └─ PluginIcon.cs              Loads the CC logo as the panel-tab icon
+├─ Settings/
+│  ├─ SettingsDialog.cs          Eto.Forms settings window
+│  └─ SettingsManager.cs         JSON persistence to %APPDATA% (with legacy migration)
+├─ Models/
+│  ├─ ClayMaterialSettings.cs    Bead diameter, overhang, density
+│  ├─ ClayPresets.cs             Porcelain / Stoneware / Earthenware
+│  ├─ RobotSettings.cs           Feed/travel speed, spindle, tilt, nozzle tool
+│  ├─ Parameters.cs              Spiral + ribbon + height parameter objects
+│  └─ PipelineSettings.cs        Top-level settings aggregate
+├─ Core/
+│  ├─ ContourSlicer.cs           Horizontal-plane contour extraction
+│  ├─ SpiralInterpolator.cs      Seam-aligned spiral between contours
+│  ├─ FrameComputer.cs           Tool frames + ribbon mesh
+│  ├─ GeometrySelector.cs        Brep/Mesh picker
+│  └─ ThinwallSpiralResult.cs    Container for slicer output
+├─ Analysis/
+│  ├─ PrintabilityAnalyzer.cs    Per-frame score (overhang, bond, curv, wrist)
+│  ├─ PrintabilityResult.cs      Score container + issue report
+│  └─ HeatmapDisplay.cs          Vertex-colored mesh overlay in viewport
+└─ RoboDK/
+   ├─ FrameSerializer.cs         Frames + settings → temp JSON
+   └─ RoboDKSubprocess.cs        Generates & runs Python 3 script via RoboDK's
+                                 embedded interpreter
+```
 
-## Collaborate with your team
+## Prerequisites
 
-* [Invite team members and collaborators](https://docs.gitlab.com/user/project/members/)
-* [Create a new merge request](https://docs.gitlab.com/user/project/merge_requests/creating_merge_requests/)
-* [Automatically close issues from merge requests](https://docs.gitlab.com/user/project/issues/managing_issues/#closing-issues-automatically)
-* [Enable merge request approvals](https://docs.gitlab.com/user/project/merge_requests/approvals/)
-* [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
+- **Rhino 8** (uses Eto.Forms + RhinoCommon 8.x)
+- **.NET Framework 4.8** for building the plugin
+- **RoboDK** with the Python API (`C:\RoboDK\Python`) installed
+- **Kuka KR 10 R1100-2 station** with the following items:
+  - Robot named `KUKA KR 10 R1100-2`
+  - Tool named `BasePlate02` (the build plate on the robot)
+  - Reference frames named `T10`, `T11`, `T12` (nozzle TCPs)
+  - A pre-configured `3DP_Template` machining project
+- Custom KUKA post processor at
+  `C:\RoboDK\Posts\KUKA_CNC_2_1_ISG_CCL_3DP_WIP_MS_S_INT_HSC_WAIT_S_DELAY.py`
 
-## Test and Deploy
+## Building
 
-Use the built-in continuous integration in GitLab.
+```bash
+cd CCL_Clay3DP
+dotnet build
+```
 
-* [Get started with GitLab CI/CD](https://docs.gitlab.com/ci/quick_start/)
-* [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/user/application_security/sast/)
-* [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/topics/autodevops/requirements/)
-* [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/user/clusters/agent/)
-* [Set up protected environments](https://docs.gitlab.com/ci/environments/protected_environments/)
+The output DLL lands in `bin\Debug\CCL_Clay3DP.dll`. Load it in
+Rhino via `_PlugInManager → Install…`.
 
-***
+## Using the plugin
 
-# Editing this README
+1. Open Rhino, type `CCL_Clay3DP` to show the dockable panel.
+2. Click **Settings** to configure:
+   - **Clay material**: preset (Porcelain / Stoneware / Earthenware) or
+     custom bead diameter, max overhang, bond ratio, density.
+   - **Spiral toolpath**: layer height, frames per layer, direction, etc.
+   - **Robot / printer**: feed rate (mm/s), travel speed, spindle S value,
+     nozzle tool (T10/T11/T12), RoboDK paths.
+3. Click **1. Spiral Slice** — pick a Brep/Mesh in Rhino. The plugin
+   generates the spiral toolpath on `3DP::Contours`, `3DP::Spiral Toolpath`
+   and `3DP::Ribbon` layers.
+4. Click **2. Analyze** — choose the heatmap channel (Clay, Robot, Both).
+   The geometry mesh is recolored on `3DP::Heatmap`.
+5. Click **3. Send to RoboDK** — opens RoboDK, loads the station template,
+   adds the curve under `BasePlate02`, links it to `3DP_Template`,
+   regenerates the program. All speeds, spindle, and reference frame come
+   from the plugin settings.
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
+## RoboDK station expectations
 
-## Suggestions for a good README
+The `3DP_v0.4.rdk` station must contain a machining project named
+`3DP_Template` that the plugin will populate. On first use, configure it
+once:
 
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
+- Robot = `KUKA KR 10 R1100-2`
+- Tool = `BasePlate02`
+- Reference = one of `T10` / `T11` / `T12` (the plugin overrides this per run)
+- Algorithm = `Robot holds object`
+- `Aproach/Retract each curve` unchecked (the plugin enforces this anyway)
+- Post processor set to the custom CYARC KUKA CNC post
 
-## Name
-Choose a self-explaining name for your project.
+Save the station. From then on, the plugin manages everything
+programmatically via the `Machining` and `ProgEvents` param dicts.
 
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
+## Settings propagated from plugin to RoboDK
 
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
+| Plugin setting | RoboDK parameter | Effect |
+|---|---|---|
+| `FeedRate` | `SpeedOperation` | Operation speed along the curve |
+| `TravelSpeed` | `SpeedRapid` | Approach / retract speed |
+| `SpindleSpeed` | `CallPathStart` event | `S<value>` inserted before first curve point |
+| `NozzleTool` | `PoseFrame` on template | T10 / T11 / T12 frame becomes the reference |
+| (always 0) | `ApproachRetractAll` | Disables per-curve approach/retract |
+| (always `S1`) | `CallPathFinish` event | Extruder off after last curve point |
+| (always 0) | `Rounding` / `RoundingOn` | No blending (KUKA CNC handles via `#HSC`) |
 
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
+## Troubleshooting
 
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
-
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
-
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
-
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
-
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
-
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
-
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
-
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
+- **Rhino crashes when opening Settings** → make sure the `FileFilter`
+  API call uses separate `name` and `ext` arguments (not the WinForms
+  pipe-delimited string).
+- **Plugin won't load after rebuild** → Rhino locks the DLL; close Rhino
+  before `dotnet build`.
+- **`3DP_Template` machining project not found** → create it once in the
+  station as described above and save the `.rdk` file.
+- **T10/T11/T12 not applied** → the template's pose frame is set via
+  `setPoseFrame` at run time; ensure the frame names in the station match
+  exactly.
 
 ## License
-For open source projects, say how it is licensed.
 
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+**Apache License 2.0**
+
+Copyright 2026 CyberCraft Lab, OTH Regensburg, Prof. Christophe Barlieb
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may
+not use this software except in compliance with the License. You may
+obtain a copy of the License in the [LICENSE](LICENSE) file at the root
+of this repository, or at <http://www.apache.org/licenses/LICENSE-2.0>.
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+implied. See the License for the specific language governing
+permissions and limitations under the License.
+
+Third-party attributions (RhinoCommon, Newtonsoft.Json, Eto.Forms,
+RoboDK API) are documented in [NOTICE](NOTICE).
+
+## Credits
+
+Developed by the **CyberCraft Lab (CCL)**, Ostbayerische Technische
+Hochschule (OTH) Regensburg, under **Prof. Christophe Barlieb**,
+founder of the CyberCraft Lab and co-founder of the CyberCraft
+Kolleg — who led the design of the print workflow, the spiral-slice
+strategy, and the integration with the CCL-ALTAR-01 cell.
+
+The plugin is tuned for the **CCL-ALTAR-01** setup:
+
+- KUKA KR 10 R1100-2 robot arm
+- Fixed Stoneflower paste/clay extruder (nozzle TCPs `T10` / `T11` / `T12`)
+- Robot-held build plate (`BasePlate02`)
+- KUKA CNC ISG 2.1 controller
+- Custom post processor with HSC BSPLINE smoothing and extruder
+  lead compensation
+
+### Adapting to your own lab
+
+If you want to use this plugin with different hardware, the pieces
+most likely to need rewiring are:
+
+| File | What's lab-specific |
+|---|---|
+| `RoboDK/RoboDKSubprocess.cs` | Robot / tool / frame names, post processor path, the `3DP_Template` machining project assumption |
+| `Models/RobotSettings.cs` | Default paths to RoboDK, default station template, nozzle tool list |
+| `Settings/SettingsDialog.cs` | Nozzle dropdown options (`T10`/`T11`/`T12`) |
+| Your copy of the KUKA post processor | G-code style, tool-change command syntax, spindle command mapping |
+
+The **slicer** (`Core/`), the **printability analyzer**
+(`Analysis/`), and the plugin scaffolding (`UI/`, `Settings/`,
+`Commands/`) are generic and should run on any Rhino 8 install
+without changes.
+
+Feedback, bug reports, and pull requests are welcome via the public
+repository. Please keep the Apache 2.0 license, the LICENSE/NOTICE
+files, and the attribution headers intact in any derivative work.
+
+## Development note
+
+This plugin was developed iteratively with the help of Anthropic's
+**Claude** (Opus 4.7) acting as a pair-programming assistant, under
+the direction of Prof. Christophe Barlieb at the CyberCraft Lab. The
+domain expertise (hardware setup, KUKA CNC post processor tuning,
+Stoneflower extruder calibration, and the overall print workflow) is
+the lab's; the AI assisted with C# scaffolding, refactoring, Eto.Forms
+panel plumbing, and boilerplate generation. Commits where Claude
+contributed significantly are tagged with `Co-Authored-By:
+Claude Opus 4.7` trailers in the git log.
+
+As with any AI-assisted code, we recommend reviewing critical paths
+(especially the RoboDK and post-processor interaction in
+`RoboDK/RoboDKSubprocess.cs`) before using the plugin on production
+hardware.
+
+## Acknowledgments
+
+Special thanks to **Peter Kinader of Sematek GmbH**, our system
+integrator, whose work commissioning the KUKA CNC ISG controller
+and the CCL-ALTAR-01 cell made this plugin possible. His
+contributions to the custom post processor and the extruder lead
+compensation logic are foundational to the print quality the plugin
+can deliver.
+
+Thanks to the team who contributed to the **CyberCraft Lab
+technologies** — the hardware, robotic cell, extrusion system, and
+supporting software that this plugin drives:
+
+- **Prof. Florian Weininger**
+- **Volker Lindner**
+- **Marc Schmailzl**
+- **Sebastian Voigt**
+- **Luis Maurer**
+
+Thanks to those who contributed to the **construction of the lab
+and its infrastructure**:
+
+- **Martin Foster**
+- **Andreas Besenhard**
+- **Alois Bräu**
+- **Christina Eichinger**
+
+And thanks for the **administrative and financial support** that
+kept the project running:
+
+- **Dean Andreas Emminger**
+- **Prof. Thomas Linner**
+
+Thanks also to the **Faculty of Architecture at OTH Regensburg**
+for providing the academic home, studio space, and material support
+that allowed the CyberCraft Lab to develop and test this work.
+
+This research was made possible through funding and institutional
+support from:
+
+- **Bayerisches Staatsministerium für Wissenschaft und Kunst**
+  (Bavarian State Ministry of Science and the Arts)
+- **bidt — Bayerisches Forschungsinstitut für Digitale
+  Transformation** (Bavarian Research Institute for Digital
+  Transformation, part of the Bavarian Academy of Sciences)
+- **OTH Regensburg** (Ostbayerische Technische Hochschule
+  Regensburg)
