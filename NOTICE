@@ -39,11 +39,13 @@ RoboDK Python API (robolink, robomath)
 KUKA CNC ISG post processor (customised)
   Base version Copyright (c) 2020 RoboDK Inc., licensed under
   the Apache License, Version 2.0. Site-specific modifications
-  by CyberCraft Lab, OTH Regensburg for the clay-extruder setup
-  (HSC BSPLINE scoping, tool-change emission, extruder lead
-  compensation). The modified post processor lives under
-  C:\RoboDK\Posts\ on the operator machine and is not part of
-  this repository.
+  by CyberCraft Lab, OTH Regensburg (2026) for the clay-extruder
+  setup (HSC BSPLINE scoping, tool-change emission, extruder lead
+  compensation, setZoneData silencing). Bundled with this
+  repository at
+  PostProcessor/KUKA_CNC_2_1_ISG_CCL_3DP_WIP_MS_S_INT_HSC_WAIT_S_DELAY.py
+  and must be copied to RoboDK's Posts\ folder at install time
+  (see README.md → "Post processor installation").
 
 CyberCraft signet logo
   "C" mark on black circle.

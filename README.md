@@ -61,6 +61,7 @@ configuration in RoboDK.
 ```
 3DP/                          Repository root
 ├─ CCL_Clay3DP/               C# Rhino 8 plugin source (the main product)
+├─ PostProcessor/             KUKA CNC ISG post processor (copy into RoboDK)
 ├─ robodk_station/            RoboDK station template (3DP_v0.4.rdk)
 ├─ 3DP.sln                    Visual Studio solution
 ├─ LICENSE                    Apache License 2.0
@@ -116,8 +117,43 @@ CCL_Clay3DP/
   - Tool named `BasePlate02` (the build plate on the robot)
   - Reference frames named `T10`, `T11`, `T12` (nozzle TCPs)
   - A pre-configured `3DP_Template` machining project
-- Custom KUKA post processor at
-  `C:\RoboDK\Posts\KUKA_CNC_2_1_ISG_CCL_3DP_WIP_MS_S_INT_HSC_WAIT_S_DELAY.py`
+- The bundled **KUKA CNC ISG post processor** installed into RoboDK
+  (see below)
+
+## Post processor installation
+
+The plugin drives a custom KUKA CNC 2.1 ISG post processor that
+handles `#HSC` BSPLINE smoothing, the `T<N> M6` tool change derived
+from the reference frame, and extruder lead compensation.
+
+The post processor lives in this repository at:
+
+```
+PostProcessor/KUKA_CNC_2_1_ISG_CCL_3DP_WIP_MS_S_INT_HSC_WAIT_S_DELAY.py
+```
+
+**You must copy it into RoboDK's `Posts` folder** for RoboDK to find
+it. On a standard Windows install that is:
+
+```
+C:\RoboDK\Posts\KUKA_CNC_2_1_ISG_CCL_3DP_WIP_MS_S_INT_HSC_WAIT_S_DELAY.py
+```
+
+If RoboDK is installed somewhere else, drop the file into the
+equivalent `Posts\` folder inside your RoboDK installation
+directory. The filename must match exactly — the plugin references
+it by name at runtime.
+
+After copying, in RoboDK you can verify the post is recognised via:
+**Program → Add/Edit Post Processor → Select Post → pick
+`KUKA_CNC_2_1_ISG_CCL_3DP_WIP_MS_S_INT_HSC_WAIT_S_DELAY`**. The
+plugin's `RoboDKSubprocess.cs` assigns it automatically on the robot
+each time *Send to RoboDK* runs, so no manual selection is needed
+during normal operation.
+
+The bundled post is a modification of RoboDK Inc.'s original KUKA
+CNC 2.1 ISG Kernel post (Apache-2.0). CCL modifications are listed
+in the file header and in [NOTICE](NOTICE).
 
 ## Building
 
