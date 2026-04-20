@@ -36,6 +36,9 @@
 #     for ~0.25 s after the command is issued)
 #   - Spindle decimal stripping: S<number>.0 -> S<number> for clean
 #     G-code output
+#   - MoveJ rapids emitted as G01 (linear) at F3000 (50 mm/s) instead
+#     of G00, so approach/retract moves stay controlled and paste flow
+#     stays predictable — see RAPID_FEED_MM_MIN
 #   - Various other minor tweaks (see commit history in the public
 #     repository for details)
 # ----------------------------------------------------
@@ -349,14 +352,23 @@ class RobotPost(object):
         return True
 
             
+    # Feed rate (mm/min) applied to rapid (approach/retract) moves. The
+    # stock RoboDK post emits G00 rapids, but for clay extrusion on the
+    # CCL-ALTAR-01 cell we need a controlled linear speed on approach and
+    # retract so the nozzle does not outrun the paste flow or collide on
+    # fast moves. Emitting G01 ... F3000 keeps those moves linear and
+    # predictable at 50 mm/s.
+    RAPID_FEED_MM_MIN = 3000
+
     def MoveJ(self, pose, joints, conf_RLF=None):
-        """Add a joint movement"""
+        """Add a joint movement (emitted as G01 at RAPID_FEED_MM_MIN for
+        controlled approach/retract — see RAPID_FEED_MM_MIN above)."""
         self.set_move_type(self.MOVE_TYPE_MCS)
-        self.addline('G00 ' + joints_2_str(joints))
-        
+        self.addline('G01 ' + joints_2_str(joints) + (' F%d' % self.RAPID_FEED_MM_MIN))
+
         if pose is not None:
             self.set_move_type(self.MOVE_TYPE_PTP)
-            self.addline('G00 ' + pose_2_str(pose, joints))
+            self.addline('G01 ' + pose_2_str(pose, joints) + (' F%d' % self.RAPID_FEED_MM_MIN))
         
     def MoveL(self, pose, joints, conf_RLF=None):
         """Add a linear movement"""

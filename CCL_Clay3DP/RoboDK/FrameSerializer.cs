@@ -28,7 +28,8 @@ namespace CCL_Clay3DP.RoboDK
         /// Normals point along Z-axis (nozzle is fixed vertical,
         /// robot holds the build plate).
         /// </summary>
-        public static string SerializeToFile(List<Plane> frames, RobotSettings robot)
+        public static string SerializeToFile(List<Plane> frames, RobotSettings robot,
+            double layerHeight)
         {
             var points = new List<double[]>();
             foreach (var frame in frames)
@@ -46,6 +47,7 @@ namespace CCL_Clay3DP.RoboDK
                 ["travel_speed"] = robot.TravelSpeed,    // mm/s for approach/retract
                 ["spindle_speed"] = robot.SpindleSpeed,  // S value
                 ["nozzle_tool"] = robot.NozzleTool,      // T10 / T11 / T12
+                ["layer_height"] = layerHeight,          // mm, for template name only
                 ["point_count"] = frames.Count,
                 ["points"] = points,
             };

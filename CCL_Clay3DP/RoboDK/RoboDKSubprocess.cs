@@ -41,8 +41,16 @@ namespace CCL_Clay3DP.RoboDK
             // Build the Python script
             string script = GenerateScript(framesJsonPath, apiPath, settings);
 
-            // Write to temp file
-            string scriptPath = Path.Combine(Path.GetTempPath(), "auto3d_robodk_send.py");
+            // Use a unique suffix per run for both the script and log so a
+            // previous subprocess that is still executing in the background
+            // (e.g. finishing a RoboDK render) doesn't hold an exclusive
+            // handle on the paths the new subprocess needs to write to.
+            // Without this, cmd.exe's '> logPath' redirection fails fast
+            // and we end up reporting an opaque file-lock IOException
+            // instead of the real RoboDK error.
+            string runStamp = DateTime.Now.ToString("yyyyMMdd_HHmmss_fff");
+            string scriptPath = Path.Combine(Path.GetTempPath(),
+                $"ccl_clay3dp_send_{runStamp}.py");
             File.WriteAllText(scriptPath, script);
 
             // Don't launch RoboDK manually — Robolink() in the Python script
@@ -50,7 +58,9 @@ namespace CCL_Clay3DP.RoboDK
 
             // Redirect Python output to a log file so the process can run
             // independently without C# having to read its output stream.
-            string logPath = Path.Combine(Path.GetTempPath(), "auto3d_robodk.log");
+            string logPath = Path.Combine(Path.GetTempPath(),
+                $"ccl_clay3dp_{runStamp}.log");
+            Rhino.RhinoApp.WriteLine($"[CCL_Clay3DP] RoboDK log: {logPath}");
 
             var proc = new Process
             {
@@ -83,13 +93,35 @@ namespace CCL_Clay3DP.RoboDK
             bool started = proc.WaitForExit(5000); // wait up to 5s for quick failures
             if (started && proc.ExitCode != 0)
             {
-                string log = File.Exists(logPath) ? File.ReadAllText(logPath) : "(no log)";
+                string log = ReadLogSafely(logPath);
                 throw new Exception(
-                    $"RoboDK script failed (exit {proc.ExitCode}):\n{log}");
+                    $"RoboDK script failed (exit {proc.ExitCode}).\n" +
+                    $"Log: {logPath}\n{log}");
             }
 
-            // Don't delete scriptPath here — the Python process may still be using it.
-            // It'll be overwritten on the next Send to RoboDK.
+            // Don't delete scriptPath or logPath here — the Python process
+            // may still be using them. Each run uses a unique timestamp in
+            // the filename so old ones don't interfere.
+        }
+
+        // Open the log with shared read/write access so we can still read
+        // even while the subprocess holds an exclusive write handle.
+        private static string ReadLogSafely(string logPath)
+        {
+            if (!File.Exists(logPath)) return "(no log file)";
+            try
+            {
+                using (var fs = new FileStream(logPath, FileMode.Open,
+                    FileAccess.Read, FileShare.ReadWrite))
+                using (var sr = new StreamReader(fs))
+                {
+                    return sr.ReadToEnd();
+                }
+            }
+            catch (Exception ex)
+            {
+                return $"(could not read log: {ex.Message})";
+            }
         }
 
         private static string GenerateScript(string framesJsonPath,
@@ -120,12 +152,14 @@ feed_rate = data.get('feed_rate', 100.0)       # mm/s, operation speed
 travel_speed = data.get('travel_speed', 100.0) # mm/s, approach/retract
 spindle_speed = data.get('spindle_speed', 500.0)
 nozzle_tool = data.get('nozzle_tool', 'T10')   # T10 / T11 / T12
+layer_height = data.get('layer_height', 0.0)   # mm, for template name only
 
 print(f'Loaded {{len(points_6xn)}} points')
 print(f'  Operation speed: {{feed_rate}} mm/s')
 print(f'  Travel speed: {{travel_speed}} mm/s')
 print(f'  Spindle: S{{spindle_speed:.0f}}')
 print(f'  Nozzle tool: {{nozzle_tool}}')
+print(f'  Layer height: {{layer_height}} mm')
 
 # Connect to running RoboDK or start one if needed
 robodk_path = r'{robodkExeEsc}' or None
@@ -133,9 +167,18 @@ rdk = robolink.Robolink(robodk_path=robodk_path)
 rdk.Render(False)  # disable rendering during import for speed
 print('Connected to RoboDK')
 
-# Close any existing station and load our template fresh
+# Close any existing station and load our template fresh.
+# If RoboDK was left open by a previous Send and the user (or our own
+# prior run) modified items, CloseStation() would normally show a
+# 'Save changes?' modal that blocks this API call indefinitely. Mark
+# the station as saved first so the close is silent — the Rhino-side
+# UI has already confirmed with the user that discarding is OK.
 station_path = r'{stationEsc}'
 if station_path:
+    try:
+        rdk.setParam('Unsaved', '0')
+    except Exception as _e:
+        print(f'Note: could not clear Unsaved flag ({{_e}}); CloseStation may prompt')
     rdk.CloseStation()
     rdk.AddFile(station_path)
     print(f'Loaded station: {{station_path}}')
@@ -200,6 +243,30 @@ if not template.Valid():
 
 print(f'Found template: {{template.Name()}}')
 
+# Rename the template to encode the run's feed/spindle/nozzle settings,
+# e.g. '3DP_T11_F50_S500'. The rename is in-memory only — the next run
+# reloads {projectName}_v*.rdk fresh via CloseStation/AddFile, so the
+# on-disk name '3DP_Template' is preserved (provided the user does not
+# hit Save in RoboDK).
+new_template_name = f'{projectName}_{{nozzle_tool}}_F{{feed_rate:.0f}}_S{{spindle_speed:.0f}}_LH{{layer_height:g}}'
+
+# Guard: if an item with the target name already exists (from a stale
+# prior run where the station wasn't reloaded, or from the user having
+# saved a renamed template into the .rdk file), delete it first so we
+# don't end up with two station items sharing the same name — RoboDK
+# allows name duplicates and Item() lookups on that name become
+# non-deterministic, which would silently break a later Send. At this
+# point `template` still has its original name '3DP_Template', so any
+# hit on the new name is by definition a different item.
+for stale_type in (robolink.ITEM_TYPE_MACHINING, robolink.ITEM_TYPE_PROGRAM):
+    stale = rdk.Item(new_template_name, stale_type)
+    if stale.Valid():
+        print(f'Removing stale item with target name: {{new_template_name}}')
+        stale.Delete()
+
+template.setName(new_template_name)
+print(f'Renamed template: {{new_template_name}}')
+
 # Update the template's reference frame to the selected nozzle tool
 template.setPoseFrame(ref_frame)
 print(f'Template reference frame set to: {{ref_frame.Name()}}')
@@ -240,6 +307,12 @@ print(f'ProgEvents: start=S{{spindle_speed:.0f}} finish=S1 rounding=off')
 
 # Now solve the path
 template.Update()
+
+# Rename the generated program to match the renamed template so the
+# RoboDK tree clearly identifies which run produced which program.
+if prog is not None and prog.Valid():
+    prog.setName(new_template_name)
+    print(f'Renamed program: {{new_template_name}}')
 
 rdk.Render(True)
 
