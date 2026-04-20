@@ -100,30 +100,149 @@ namespace CCL_Clay3DP.UI
             };
         }
 
+        // Layers the plugin generates during Spiral Slice and Analyze.
+        // Used to detect stale generated geometry after a settings change
+        // and to clear it on the user's confirmation.
+        private static readonly string[] GeneratedLayerNames = new[]
+        {
+            "3DP::Contours",
+            "3DP::Spiral Toolpath",
+            "3DP::Ribbon",
+            "3DP::Heatmap",
+        };
+
         private void OnSettingsClick(object sender, EventArgs e)
         {
             var dialog = new SettingsDialog(_settings);
-            if (dialog.ShowModal(this))
+            if (!dialog.ShowModal(this)) return;
+
+            _settings = SettingsManager.Load();
+            SetStatus("Settings saved");
+
+            // After a settings change, any previously generated spiral /
+            // ribbon / heatmap geometry — and the cached slice result used
+            // by Send to RoboDK — were computed with the OLD settings and
+            // are now stale. Clear the generated layers unconditionally,
+            // then auto-rebuild from the same geometry if we still have a
+            // reference to it. This avoids the easy-to-miss "remember to
+            // re-run Spiral Slice" failure mode.
+            var doc = RhinoDoc.ActiveDoc;
+            if (doc == null) return;
+            if (!HasGeneratedContent(doc)) return;
+
+            var geometryToRebuild = _lastGeometry;
+            ClearGeneratedContent(doc);
+            _lastResult = null;
+            _lastGeometry = null;
+
+            if (geometryToRebuild != null)
             {
-                _settings = SettingsManager.Load();
-                SetStatus("Settings saved");
+                SetStatus("Settings changed — regenerating spiral...");
+                RhinoApp.Wait();
+                RunSliceAndBake(geometryToRebuild);
+
+                // If the user has already pushed this job to RoboDK in this
+                // session, keep RoboDK in sync with the new settings without
+                // making them click Send again. We skip the confirm dialog
+                // because the user just explicitly asked for this change by
+                // saving settings.
+                if (_hasSentToRoboDK && _lastResult != null
+                    && _lastResult.Frames.Count > 0)
+                {
+                    SetStatus("Settings changed — updating RoboDK template...");
+                    RhinoApp.Wait();
+                    PerformSendToRoboDK();
+                }
             }
+            else
+            {
+                SetStatus("Generated layers cleared — re-run Spiral Slice");
+            }
+        }
+
+        private bool HasGeneratedContent(RhinoDoc doc)
+        {
+            if (_lastResult != null) return true;
+            var indices = FindGeneratedLayerIndices(doc);
+            if (indices.Count == 0) return false;
+            foreach (var obj in doc.Objects)
+            {
+                if (obj == null || obj.IsDeleted) continue;
+                if (indices.Contains(obj.Attributes.LayerIndex)) return true;
+            }
+            return false;
+        }
+
+        // The plugin creates its layers as nested Rhino layers — e.g.
+        // '3DP::Contours' is a layer named 'Contours' whose parent is '3DP'.
+        // RhinoDoc.Layers.FindName() only matches the leaf '.Name', so it
+        // returns null for full paths. FindByFullPath() is the correct
+        // lookup for the '::' style paths the plugin generates.
+        private static System.Collections.Generic.HashSet<int>
+            FindGeneratedLayerIndices(RhinoDoc doc)
+        {
+            var indices = new System.Collections.Generic.HashSet<int>();
+            foreach (var name in GeneratedLayerNames)
+            {
+                int idx = doc.Layers.FindByFullPath(name, -1);
+                if (idx >= 0) indices.Add(idx);
+            }
+            return indices;
+        }
+
+        private void ClearGeneratedContent(RhinoDoc doc)
+        {
+            var targetIndices = FindGeneratedLayerIndices(doc);
+            if (targetIndices.Count == 0)
+            {
+                RhinoApp.WriteLine("[CCL_Clay3DP] No generated layers found to clear");
+                return;
+            }
+
+            // Unlock any target layer that was locked, else Delete() refuses.
+            foreach (int idx in targetIndices)
+            {
+                var layer = doc.Layers[idx];
+                if (layer != null && layer.IsLocked) layer.IsLocked = false;
+            }
+
+            // Snapshot first — deleting while enumerating doc.Objects is unsafe.
+            var victims = new System.Collections.Generic.List<Rhino.DocObjects.RhinoObject>();
+            foreach (var obj in doc.Objects)
+            {
+                if (obj == null || obj.IsDeleted) continue;
+                if (targetIndices.Contains(obj.Attributes.LayerIndex))
+                    victims.Add(obj);
+            }
+
+            int deleted = 0, failed = 0;
+            foreach (var obj in victims)
+            {
+                if (doc.Objects.Delete(obj, true)) deleted++;
+                else failed++;
+            }
+            doc.Views.Redraw();
+            RhinoApp.WriteLine(
+                $"[CCL_Clay3DP] Cleared {deleted} generated object(s)" +
+                (failed > 0 ? $" ({failed} failed to delete)" : ""));
         }
 
         private void OnSpiralSliceClick(object sender, EventArgs e)
         {
+            SetStatus("Selecting geometry...");
+            var selection = GeometrySelector.Select();
+            if (selection == null)
+            {
+                SetStatus("Cancelled");
+                return;
+            }
+            RunSliceAndBake(selection);
+        }
+
+        private void RunSliceAndBake(GeometrySelection selection)
+        {
             try
             {
-                SetStatus("Selecting geometry...");
-
-                // 1) Select geometry
-                var selection = GeometrySelector.Select();
-                if (selection == null)
-                {
-                    SetStatus("Cancelled");
-                    return;
-                }
-
                 SetStatus("Slicing contours...");
 
                 // Progress callback: updates Rhino status bar
@@ -385,6 +504,20 @@ namespace CCL_Clay3DP.UI
 
         private void OnSendToRoboDKClick(object sender, EventArgs e)
         {
+            // Warn if a RoboDK session is already running. Each Send reloads
+            // the station template from disk, discarding any manual edits the
+            // user has made in RoboDK. Fail-safe: if we can't enumerate
+            // processes, skip the check rather than block the send.
+            if (IsRoboDKRunning() && !ConfirmReplaceRoboDKSession())
+            {
+                SetStatus("Send to RoboDK cancelled");
+                return;
+            }
+            PerformSendToRoboDK();
+        }
+
+        private void PerformSendToRoboDK()
+        {
             try
             {
                 if (_lastResult == null || _lastResult.Frames.Count == 0)
@@ -396,7 +529,7 @@ namespace CCL_Clay3DP.UI
                 SetStatus($"Serializing {_lastResult.Frames.Count} frames...");
 
                 string jsonPath = RoboDK.FrameSerializer.SerializeToFile(
-                    _lastResult.Frames, _settings.Robot);
+                    _lastResult.Frames, _settings.Robot, _settings.Helix.LayerHeight);
 
                 SetStatus("Sending to RoboDK...");
                 RhinoApp.Wait();
@@ -407,12 +540,49 @@ namespace CCL_Clay3DP.UI
                 try { System.IO.File.Delete(jsonPath); } catch { }
 
                 SetStatus($"Sent {_lastResult.Frames.Count} targets to RoboDK");
+                _hasSentToRoboDK = true;
             }
             catch (Exception ex)
             {
                 SetStatus($"RoboDK error: {ex.Message}");
                 RhinoApp.WriteLine($"[CCL_Clay3DP] RoboDK failed: {ex}");
             }
+        }
+
+        // Tracks whether the user has already sent to RoboDK in this session.
+        // Used to decide whether a settings-triggered auto-regenerate should
+        // also auto-push the updated toolpath to RoboDK — we only do that if
+        // RoboDK is already in the workflow; otherwise an auto-send would be
+        // surprising (it would spawn RoboDK out of the blue).
+        private bool _hasSentToRoboDK = false;
+
+        private static bool IsRoboDKRunning()
+        {
+            try
+            {
+                return System.Diagnostics.Process
+                    .GetProcessesByName("RoboDK").Length > 0;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private bool ConfirmReplaceRoboDKSession()
+        {
+            var result = MessageBox.Show(
+                this,
+                "RoboDK appears to already be running.\n\n" +
+                "Sending will reload the station template from disk, which " +
+                "discards any manual changes you may have made in RoboDK " +
+                "(renamed items, edited targets, new programs, etc.).\n\n" +
+                "Continue and replace the current RoboDK session?",
+                "CCL_Clay3DP — Replace RoboDK session?",
+                MessageBoxButtons.YesNo,
+                MessageBoxType.Warning,
+                MessageBoxDefaultButton.No);
+            return result == DialogResult.Yes;
         }
 
         private void OnRunAllClick(object sender, EventArgs e)
