@@ -41,6 +41,9 @@ namespace CCL_Clay3DP.Settings
         private NumericStepper _heightOffsetTop;
         private NumericStepper _ribbonWidth;
 
+        // Zigzag fields
+        private NumericStepper _zigzagNumPoints;
+
         // Robot fields
         private NumericStepper _feedRate;
         private NumericStepper _travelSpeed;
@@ -129,6 +132,23 @@ namespace CCL_Clay3DP.Settings
                 },
             };
 
+            // --- Zigzag ---
+            _zigzagNumPoints = CreateStepper(4, 4096, 2, 0);
+
+            var zigzagGroup = new GroupBox
+            {
+                Text = "Zigzag",
+                Content = new TableLayout
+                {
+                    Spacing = new Size(8, 4),
+                    Padding = new Padding(8),
+                    Rows =
+                    {
+                        LabeledRow("Points per contour (even)", _zigzagNumPoints),
+                    },
+                },
+            };
+
             // --- Robot / Printer ---
             _feedRate = CreateStepper(1.0, 500.0, 10.0, 1);
             _travelSpeed = CreateStepper(1.0, 500.0, 10.0, 1);
@@ -201,6 +221,7 @@ namespace CCL_Clay3DP.Settings
                 {
                     new TableRow(clayGroup),
                     new TableRow(spiralGroup),
+                    new TableRow(zigzagGroup),
                     new TableRow(robotGroup),
                     new TableRow(new TableLayout
                     {
@@ -233,6 +254,9 @@ namespace CCL_Clay3DP.Settings
             _heightOffsetBottom.Value = _settings.Height.HeightOffsetBottom;
             _heightOffsetTop.Value = _settings.Height.HeightOffsetTop;
             _ribbonWidth.Value = _settings.Ribbon.RibbonWidth;
+
+            // Zigzag
+            _zigzagNumPoints.Value = _settings.Zigzag.NumPoints;
 
             // Robot
             _feedRate.Value = _settings.Robot.FeedRate;
@@ -271,6 +295,9 @@ namespace CCL_Clay3DP.Settings
             _settings.Height.HeightOffsetBottom = _heightOffsetBottom.Value;
             _settings.Height.HeightOffsetTop = _heightOffsetTop.Value;
             _settings.Ribbon.RibbonWidth = _ribbonWidth.Value;
+
+            // Zigzag
+            _settings.Zigzag.NumPoints = (int)_zigzagNumPoints.Value;
 
             // Robot
             _settings.Robot.FeedRate = _feedRate.Value;

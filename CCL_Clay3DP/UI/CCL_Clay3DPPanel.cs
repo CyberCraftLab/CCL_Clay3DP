@@ -24,6 +24,7 @@ using CCL_Clay3DP.Analysis;
 using CCL_Clay3DP.Core;
 using CCL_Clay3DP.Models;
 using CCL_Clay3DP.Settings;
+using CCL_Clay3DP.Zigzag;
 
 namespace CCL_Clay3DP.UI
 {
@@ -53,6 +54,12 @@ namespace CCL_Clay3DP.UI
             // Workflow buttons
             var sliceButton = new Button { Text = "1. Spiral Slice" };
             sliceButton.Click += OnSpiralSliceClick;
+
+            var shellButton = new Button { Text = "Zigzag Test (experimental)" };
+            shellButton.Click += OnZigzagTestClick;
+
+            var pipesButton = new Button { Text = "Pipes (visualization)" };
+            pipesButton.Click += OnPipesClick;
 
             _analysisChannel = new DropDown();
             _analysisChannel.Items.Add("Clay");
@@ -93,6 +100,9 @@ namespace CCL_Clay3DP.UI
                     new TableRow(new Divider()),
                     new TableRow(runAllButton),
                     new TableRow(new Divider()),
+                    new TableRow(shellButton),
+                    new TableRow(pipesButton),
+                    new TableRow(new Divider()),
                     new TableRow(_statusLabel),
                     new TableRow(_detailLabel),
                     null, // fill remaining space
@@ -109,6 +119,13 @@ namespace CCL_Clay3DP.UI
             "3DP::Spiral Toolpath",
             "3DP::Ribbon",
             "3DP::Heatmap",
+            "3DP::Zigzag Contour",
+            "3DP::Zigzag Outer Pts",
+            "3DP::Zigzag Inner Pts",
+            "3DP::Zigzag Inner Curves",
+            "3DP::Zigzag",
+            "3DP::Zigzag Inward Vectors",
+            "3DP::Zigzag Pipes",
         };
 
         private void OnSettingsClick(object sender, EventArgs e)
@@ -583,6 +600,411 @@ namespace CCL_Clay3DP.UI
                 MessageBoxType.Warning,
                 MessageBoxDefaultButton.No);
             return result == DialogResult.Yes;
+        }
+
+        private void OnZigzagTestClick(object sender, EventArgs e)
+        {
+            try
+            {
+                SetStatus("Zigzag: select geometry...");
+                var selection = GeometrySelector.Select();
+                if (selection == null) { SetStatus("Cancelled"); return; }
+
+                // Non-per-run params come from settings.
+                int numPoints = _settings.Zigzag.NumPoints;
+                double layerHeight = _settings.Helix.LayerHeight;
+
+                // Slice now so we can preview inward arrows before asking the
+                // user to pick flip direction and offset distance.
+                SetStatus($"Zigzag: slicing at {layerHeight}mm layer height...");
+                RhinoApp.Wait();
+                List<Curve> contours = selection.Brep != null
+                    ? ContourSlicer.SliceBrep(selection.Brep, layerHeight, 0, 0)
+                    : ContourSlicer.SliceMesh(selection.Mesh, layerHeight, 0, 0);
+
+                // Preview arrows: fixed short length (5 mm) just to show the
+                // algorithm's default inward-direction choice. User answers
+                // Flip based on what they see, then picks distance.
+                const double previewArrowLength = 5.0;
+                BakePreviewArrows(contours, numPoints, previewArrowLength, false);
+                RhinoApp.Wait();
+
+                bool flipInward = false;
+                var gbFlip = Rhino.Input.RhinoGet.GetBool(
+                    "Flip inward direction? (red arrows in viewport show current side)",
+                    true, "No", "Yes", ref flipInward);
+                if (gbFlip != Rhino.Commands.Result.Success &&
+                    gbFlip != Rhino.Commands.Result.Nothing)
+                {
+                    SetStatus("Cancelled");
+                    return;
+                }
+
+                if (flipInward)
+                {
+                    ClearLayerObjects(RhinoDoc.ActiveDoc, "3DP::Zigzag Inward Vectors");
+                    BakePreviewArrows(contours, numPoints, previewArrowLength, true);
+                    RhinoApp.Wait();
+                }
+
+                double distance = 3.0;
+                var gnD = new Rhino.Input.Custom.GetNumber();
+                gnD.SetCommandPrompt("Inward offset distance (mm)");
+                gnD.SetDefaultNumber(distance);
+                gnD.SetLowerLimit(0.01, false);
+                if (gnD.Get() != Rhino.Input.GetResult.Number)
+                {
+                    SetStatus("Cancelled");
+                    return;
+                }
+                distance = gnD.Number();
+
+                // Clear preview arrows; BakeZigzagStack will re-bake them at
+                // the actual chosen distance so the final visualization reflects
+                // the real inward offset magnitude.
+                ClearLayerObjects(RhinoDoc.ActiveDoc, "3DP::Zigzag Inward Vectors");
+
+                SetStatus($"Zigzag: generating {contours.Count} layers...");
+                RhinoApp.Wait();
+
+                var goodContours = new List<Curve>();
+                var results = new List<Zigzag.SimpleZigzagResult>();
+                int skipped = 0;
+                for (int i = 0; i < contours.Count; i++)
+                {
+                    try
+                    {
+                        var r = Zigzag.ZigzagGenerator.BuildSingleContour(
+                            contours[i], numPoints, distance, flipInward);
+                        results.Add(r);
+                        goodContours.Add(contours[i]);
+                    }
+                    catch (Exception ex)
+                    {
+                        skipped++;
+                        RhinoApp.WriteLine(
+                            $"[CCL_Clay3DP] Zigzag layer {i} skipped: {ex.Message}");
+                    }
+                }
+
+                BakeZigzagStack(goodContours, results);
+                SetStatus(
+                    $"Zigzag complete: {results.Count} layers" +
+                    (skipped > 0 ? $", {skipped} skipped" : ""));
+            }
+            catch (Exception ex)
+            {
+                SetStatus($"Zigzag error: {ex.Message}");
+                RhinoApp.WriteLine($"[CCL_Clay3DP] Zigzag failed: {ex}");
+            }
+        }
+
+        private void BakeZigzagStack(
+            List<Curve> contours, List<Zigzag.SimpleZigzagResult> results)
+        {
+            var doc = RhinoDoc.ActiveDoc;
+            if (doc == null) return;
+
+            int contourLayer = EnsureLayer(doc, "3DP::Zigzag Contour",
+                System.Drawing.Color.FromArgb(180, 180, 180));
+            int outerPtsLayer = EnsureLayer(doc, "3DP::Zigzag Outer Pts",
+                System.Drawing.Color.FromArgb(40, 40, 40));
+            int innerPtsLayer = EnsureLayer(doc, "3DP::Zigzag Inner Pts",
+                System.Drawing.Color.FromArgb(40, 80, 200));
+            int innerCurveLayer = EnsureLayer(doc, "3DP::Zigzag Inner Curves",
+                System.Drawing.Color.FromArgb(80, 120, 220));
+            int zzLayer = EnsureLayer(doc, "3DP::Zigzag",
+                System.Drawing.Color.FromArgb(0, 200, 255));
+            int arrowLayer = EnsureLayer(doc, "3DP::Zigzag Inward Vectors",
+                System.Drawing.Color.FromArgb(220, 40, 40));
+
+            var attrs = new ObjectAttributes();
+
+            for (int i = 0; i < contours.Count; i++)
+            {
+                var contour = contours[i];
+                var r = results[i];
+
+                if (contour != null && contour.IsValid)
+                {
+                    attrs.LayerIndex = contourLayer;
+                    attrs.Name = "ZigzagContour";
+                    doc.Objects.AddCurve(contour, attrs);
+                }
+
+                attrs.LayerIndex = outerPtsLayer;
+                attrs.Name = "ZigzagOuterPt";
+                foreach (var p in r.OuterPoints) doc.Objects.AddPoint(p, attrs);
+
+                attrs.LayerIndex = innerPtsLayer;
+                attrs.Name = "ZigzagInnerPt";
+                foreach (var p in r.InnerPoints) doc.Objects.AddPoint(p, attrs);
+
+                if (r.InnerCurve != null && r.InnerCurve.IsValid)
+                {
+                    attrs.LayerIndex = innerCurveLayer;
+                    attrs.Name = "ZigzagInnerCurve";
+                    doc.Objects.AddCurve(r.InnerCurve, attrs);
+                }
+
+                // Inward-direction arrows: one line per outer point, with
+                // EndArrowhead decoration so Rhino renders a real arrow
+                // pointing at the corresponding inner point.
+                var arrowAttrs = new ObjectAttributes
+                {
+                    LayerIndex = arrowLayer,
+                    Name = "ZigzagInwardArrow",
+                    ObjectDecoration = ObjectDecoration.EndArrowhead,
+                };
+                int arrowCount = Math.Min(r.OuterPoints.Count, r.InnerPoints.Count);
+                for (int k = 0; k < arrowCount; k++)
+                {
+                    var line = new LineCurve(r.OuterPoints[k], r.InnerPoints[k]);
+                    if (line.IsValid)
+                        doc.Objects.AddCurve(line, arrowAttrs);
+                }
+
+                if (r.Zigzag != null && r.Zigzag.IsValid)
+                {
+                    attrs.LayerIndex = zzLayer;
+                    attrs.Name = "Zigzag";
+                    doc.Objects.AddCurve(r.Zigzag, attrs);
+                }
+            }
+
+            // Hide the point and contour helper layers by default so the
+            // zigzag curves read clean; user can toggle them on if needed.
+            // Arrows also hidden by default — enable to verify the inward
+            // direction choice before the next run.
+            if (contourLayer >= 0 && contourLayer < doc.Layers.Count)
+                doc.Layers[contourLayer].IsVisible = false;
+            if (outerPtsLayer >= 0 && outerPtsLayer < doc.Layers.Count)
+                doc.Layers[outerPtsLayer].IsVisible = false;
+            if (innerPtsLayer >= 0 && innerPtsLayer < doc.Layers.Count)
+                doc.Layers[innerPtsLayer].IsVisible = false;
+            // Keep arrow layer visible — user asked to see the inward direction.
+            if (arrowLayer >= 0 && arrowLayer < doc.Layers.Count)
+                doc.Layers[arrowLayer].IsVisible = true;
+
+            doc.Views.Redraw();
+        }
+
+        private void OnPipesClick(object sender, EventArgs e)
+        {
+            try
+            {
+                var doc = RhinoDoc.ActiveDoc;
+                if (doc == null) { SetStatus("No active document"); return; }
+
+                // Bead diameter comes from clay settings — not prompted.
+                double diameter = _settings.Clay.BeadDiameter;
+                if (diameter <= 0)
+                {
+                    SetStatus("Bead diameter must be > 0 in Clay settings");
+                    return;
+                }
+                double radius = diameter * 0.5;
+
+                // Source layers: outer contours, inner curves, zigzags
+                var sourceLayerNames = new[]
+                {
+                    "3DP::Zigzag Contour",
+                    "3DP::Zigzag Inner Curves",
+                    "3DP::Zigzag",
+                };
+                var srcIndices = new System.Collections.Generic.HashSet<int>();
+                foreach (var name in sourceLayerNames)
+                {
+                    int idx = doc.Layers.FindByFullPath(name, -1);
+                    if (idx >= 0) srcIndices.Add(idx);
+                }
+                if (srcIndices.Count == 0)
+                {
+                    SetStatus("No zigzag curves found — run Zigzag first");
+                    return;
+                }
+
+                var curves = new List<Curve>();
+                foreach (var obj in doc.Objects)
+                {
+                    if (obj == null || obj.IsDeleted) continue;
+                    if (!srcIndices.Contains(obj.Attributes.LayerIndex)) continue;
+                    if (obj.Geometry is Curve c) curves.Add(c);
+                }
+
+                if (curves.Count == 0)
+                {
+                    SetStatus("No curves on zigzag layers");
+                    return;
+                }
+
+                // Warn before starting — piping can take a while on dense stacks
+                // and users were getting spooked by the hang.
+                var confirm = MessageBox.Show(
+                    this,
+                    $"About to pipe {curves.Count} curves at {diameter:F2} mm " +
+                    "bead diameter.\n\nThis can take a few moments on dense " +
+                    "geometry. Continue?",
+                    "CCL_Clay3DP — Generate pipes",
+                    MessageBoxButtons.YesNo,
+                    MessageBoxType.Information,
+                    MessageBoxDefaultButton.Yes);
+                if (confirm != DialogResult.Yes)
+                {
+                    SetStatus("Pipes cancelled");
+                    return;
+                }
+
+                int pipesLayer = EnsureLayer(doc, "3DP::Zigzag Pipes",
+                    System.Drawing.Color.FromArgb(220, 180, 80));
+
+                var attrs = new ObjectAttributes
+                {
+                    LayerIndex = pipesLayer,
+                    Name = "ZigzagPipe",
+                };
+
+                Rhino.UI.StatusBar.ShowProgressMeter(
+                    0, curves.Count, "CCL_Clay3DP: piping", true, true);
+                var lastUpdate = DateTime.Now;
+
+                int pipedOk = 0, failed = 0;
+                for (int i = 0; i < curves.Count; i++)
+                {
+                    var c = curves[i];
+
+                    // Ensure a single continuous input curve. PolyCurves from
+                    // JoinCurves can pipe as many fragments — unnest first so
+                    // the pipe treats it as one sweep.
+                    if (c is PolyCurve pc)
+                    {
+                        pc = (PolyCurve)pc.DuplicateCurve();
+                        pc.RemoveNesting();
+                        c = pc;
+                    }
+
+                    Mesh pipe = null;
+                    try
+                    {
+                        pipe = Mesh.CreateFromCurvePipe(
+                            c, radius, 12, 1,
+                            MeshPipeCapStyle.Flat, false);
+                    }
+                    catch { }
+
+                    if (pipe != null && pipe.IsValid)
+                    {
+                        doc.Objects.AddMesh(pipe, attrs);
+                        pipedOk++;
+                    }
+                    else
+                    {
+                        failed++;
+                    }
+
+                    // Mesh spheres at each polyline vertex — fills the kink
+                    // at every bend so the viz reads as one continuous bead.
+                    // Skipped for non-polyline (NURBS) curves which don't have
+                    // discrete bends.
+                    if (c.TryGetPolyline(out Polyline pl) && pl.Count > 0)
+                    {
+                        // Closed polylines repeat the first vertex at the end;
+                        // skip the duplicate to avoid a double sphere at the seam.
+                        int last = pl.IsClosed ? pl.Count - 1 : pl.Count;
+                        for (int k = 0; k < last; k++)
+                        {
+                            var sphereMesh = Mesh.CreateFromSphere(
+                                new Sphere(pl[k], radius), 12, 8);
+                            if (sphereMesh != null && sphereMesh.IsValid)
+                                doc.Objects.AddMesh(sphereMesh, attrs);
+                        }
+                    }
+
+                    Rhino.UI.StatusBar.UpdateProgressMeter(i + 1, true);
+                    var now = DateTime.Now;
+                    if ((now - lastUpdate).TotalMilliseconds > 500)
+                    {
+                        lastUpdate = now;
+                        Rhino.UI.StatusBar.SetMessagePane(
+                            $"CCL_Clay3DP: piping {i + 1}/{curves.Count}");
+                        RhinoApp.Wait();
+                    }
+                }
+                Rhino.UI.StatusBar.HideProgressMeter();
+
+                doc.Views.Redraw();
+                SetStatus(
+                    $"Pipes: {pipedOk}/{curves.Count} meshes" +
+                    (failed > 0 ? $" ({failed} failed)" : ""));
+            }
+            catch (Exception ex)
+            {
+                Rhino.UI.StatusBar.HideProgressMeter();
+                SetStatus($"Pipes error: {ex.Message}");
+                RhinoApp.WriteLine($"[CCL_Clay3DP] Pipes failed: {ex}");
+            }
+        }
+
+        /// <summary>
+        /// Bake inward-direction arrows at a fixed viz length for each layer's
+        /// outer points. Called before the flip/distance prompts so the user
+        /// can see which side the algorithm picked as inward.
+        /// </summary>
+        private void BakePreviewArrows(
+            List<Curve> contours, int numPoints, double length, bool flip)
+        {
+            var doc = RhinoDoc.ActiveDoc;
+            if (doc == null) return;
+
+            int arrowLayer = EnsureLayer(doc, "3DP::Zigzag Inward Vectors",
+                System.Drawing.Color.FromArgb(220, 40, 40));
+            if (arrowLayer >= 0 && arrowLayer < doc.Layers.Count)
+                doc.Layers[arrowLayer].IsVisible = true;
+
+            var attrs = new ObjectAttributes
+            {
+                LayerIndex = arrowLayer,
+                Name = "ZigzagInwardArrowPreview",
+                ObjectDecoration = ObjectDecoration.EndArrowhead,
+            };
+
+            foreach (var contour in contours)
+            {
+                if (contour == null) continue;
+                try
+                {
+                    var r = Zigzag.ZigzagGenerator.BuildSingleContour(
+                        contour, numPoints, length, flip);
+                    int n = Math.Min(r.OuterPoints.Count, r.InnerPoints.Count);
+                    for (int k = 0; k < n; k++)
+                    {
+                        var line = new LineCurve(r.OuterPoints[k], r.InnerPoints[k]);
+                        if (line.IsValid) doc.Objects.AddCurve(line, attrs);
+                    }
+                }
+                catch { /* skip bad layers silently for preview */ }
+            }
+
+            doc.Views.Redraw();
+        }
+
+        /// <summary>
+        /// Delete all objects on a specific Rhino layer (by full "::" path).
+        /// Used to clear preview arrows before re-baking.
+        /// </summary>
+        private void ClearLayerObjects(RhinoDoc doc, string fullPath)
+        {
+            if (doc == null) return;
+            int idx = doc.Layers.FindByFullPath(fullPath, -1);
+            if (idx < 0) return;
+            var victims = new List<Rhino.DocObjects.RhinoObject>();
+            foreach (var obj in doc.Objects)
+            {
+                if (obj == null || obj.IsDeleted) continue;
+                if (obj.Attributes.LayerIndex == idx) victims.Add(obj);
+            }
+            foreach (var v in victims) doc.Objects.Delete(v, true);
+            doc.Views.Redraw();
         }
 
         private void OnRunAllClick(object sender, EventArgs e)

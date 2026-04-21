@@ -123,6 +123,33 @@ namespace CCL_Clay3DP.Core
         }
 
         /// <summary>
+        /// Slice a mesh at a single Z and return the longest closed contour, or null.
+        /// Used to pair inner-shell contours to outer-shell contour heights exactly.
+        /// </summary>
+        public static Curve SliceMeshAt(Mesh mesh, double z)
+        {
+            if (mesh == null) return null;
+            var plane = new Plane(new Point3d(0, 0, z), Vector3d.ZAxis);
+            var polylines = Intersection.MeshPlane(mesh, plane);
+            if (polylines == null || polylines.Length == 0) return null;
+            var curves = polylines.Select(p => (Curve)new PolylineCurve(p)).ToArray();
+            return JoinAndPickLargest(curves);
+        }
+
+        /// <summary>
+        /// Slice a Brep at a single Z and return the longest closed contour, or null.
+        /// </summary>
+        public static Curve SliceBrepAt(Brep brep, double z)
+        {
+            if (brep == null) return null;
+            var plane = new Plane(new Point3d(0, 0, z), Vector3d.ZAxis);
+            bool ok = Intersection.BrepPlane(brep, plane, 0.001,
+                out Curve[] curves, out Point3d[] points);
+            if (!ok || curves == null || curves.Length == 0) return null;
+            return JoinAndPickLargest(curves);
+        }
+
+        /// <summary>
         /// Join curve fragments and return the longest closed curve.
         /// If no closed curves found, try to close the longest open curve.
         /// </summary>

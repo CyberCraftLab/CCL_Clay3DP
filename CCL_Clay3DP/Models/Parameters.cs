@@ -50,4 +50,11 @@ namespace CCL_Clay3DP.Models
         public double RibbonWidth { get; set; } = 5.0;
         public bool HideBoundingCylinder { get; set; } = true;
     }
+
+    public class ZigzagParameters
+    {
+        // Number of points the contour is divided into per layer. Even values
+        // close the zigzag cleanly; odd values are auto-bumped up.
+        public int NumPoints { get; set; } = 32;
+    }
 }
