@@ -46,15 +46,34 @@ configuration in RoboDK.
 
 ## What it does
 
-1. **Contour slicer** — slices the geometry with horizontal planes and
-   interpolates a continuous spiral between contours (vase mode, no Z-seam).
+1. **Toolpath generator** — two modes, chosen in Settings:
+   - **Spiral Slice** — continuous spiral between horizontal contours
+     (vase mode, no Z-seam).
+   - **Layer Slice** — discrete planar layer contours. With the optional
+     **Inner Wall Bracing** flag, each layer also gets an inward-offset
+     inner wall plus a triangle-wave "bracing" rib between the two walls
+     for structural stiffening. Robot print order per layer is
+     **Inner Toolpath → Outer Toolpath → Bracing Toolpath**, then up to
+     the next layer.
 2. **Printability analysis** — colors the geometry mesh in the viewport
    with a red-yellow-green heatmap showing where clay printing is at risk
-   (overhang angles, layer bond, robot wrist velocity).
-3. **RoboDK integration** — opens the pre-configured `3DP_v0.4.rdk`
-   station, adds the spiral as a Curve Follow object under the build plate,
-   links it to the `3DP_Template` machining project, and regenerates the
-   robot program using the CYARC KUKA post processor.
+   (overhang angles, layer bond, robot wrist velocity). Works in every
+   mode; three channels (Clay, Robot, Both) all render to the mesh.
+3. **Pipes visualization** — renders whichever toolpath curves exist
+   (`Spiral Toolpath` / `Outer Toolpath` / `Inner Toolpath` /
+   `Bracing Toolpath`) as mesh bead tubes at the configured Clay bead
+   diameter, with mesh-sphere joints at every vertex for continuity.
+4. **RoboDK integration** — opens the pre-configured `3DP_v0.4.rdk`
+   station, adds the toolpath as a Curve Follow object under the build
+   plate, links it to the `3DP_Template` machining project, and
+   regenerates the robot program using the CYARC KUKA post processor.
+
+**Workflow gating.** The Settings form is the first thing the user must
+interact with; all other workflow buttons (Slice, Analyze, Send, Pipes)
+stay disabled until Settings has been reviewed once in the session.
+Switching between Spiral and Layer modes automatically clears the other
+mode's generated layers on the next Slice, so the Rhino Layers panel
+always reflects only the current mode.
 
 ## Repository layout
 
@@ -101,11 +120,39 @@ CCL_Clay3DP/
 │  ├─ PrintabilityAnalyzer.cs    Per-frame score (overhang, bond, curv, wrist)
 │  ├─ PrintabilityResult.cs      Score container + issue report
 │  └─ HeatmapDisplay.cs          Vertex-colored mesh overlay in viewport
+├─ Zigzag/
+│  └─ ZigzagGenerator.cs         Layer-mode inner-wall bracing generator:
+│                                in-plane inward projection + triangle-wave
+│                                weave, with hairpin trim for concave geometry
 └─ RoboDK/
    ├─ FrameSerializer.cs         Frames + settings → temp JSON
    └─ RoboDKSubprocess.cs        Generates & runs Python 3 script via RoboDK's
                                  embedded interpreter
 ```
+
+### Rhino layers produced
+
+All output lives under a shared `3DP` parent layer. Only the layers that
+the current slice mode needs are created; switching modes removes the
+others on the next Slice.
+
+| Layer | Content | Visible by default |
+|---|---|---|
+| `3DP::Spiral Toolpath` | The spiral curve (Spiral mode) | yes |
+| `3DP::Ribbon` | Tool-orientation ribbon mesh (Spiral mode) | no (debug aid) |
+| `3DP::Outer Toolpath` | Outer wall curve per layer (Layer mode) | yes |
+| `3DP::Inner Toolpath` | Inner wall curve per layer (Layer + Bracing) | yes |
+| `3DP::Bracing Toolpath` | Triangle-wave rib per layer (Layer + Bracing) | yes |
+| `3DP::Bracing Vectors` | Inward-direction arrows (Layer + Bracing) | no (flip preview) |
+| `3DP::Bracing Outer Points` | Sample points on outer wall (Layer + Bracing) | no |
+| `3DP::Bracing Inner Points` | Sample points on inner wall (Layer + Bracing) | no |
+| `3DP::Toolpath Pipes` | Mesh-pipe visualization (any mode, Pipes button) | yes |
+| `3DP::Heatmap` | Vertex-colored input mesh (Analyze) | yes |
+
+In Layer + Bracing mode, picking **Yes** for the "flip inward direction"
+prompt swaps which underlying curve lands on the `Outer Toolpath` vs.
+`Inner Toolpath` layer so the names always match what's geometrically
+outer vs. inner.
 
 ## Prerequisites
 

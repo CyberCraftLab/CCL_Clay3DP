@@ -21,6 +21,5 @@ namespace CCL_Clay3DP.Models
         public HelixParameters Helix { get; set; } = new HelixParameters();
         public RibbonParameters Ribbon { get; set; } = new RibbonParameters();
         public RobotSettings Robot { get; set; } = new RobotSettings();
-        public ZigzagParameters Zigzag { get; set; } = new ZigzagParameters();
     }
 }

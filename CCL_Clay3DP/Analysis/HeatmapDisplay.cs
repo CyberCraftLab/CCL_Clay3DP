@@ -85,59 +85,59 @@ namespace CCL_Clay3DP.Analysis
         }
 
         /// <summary>
-        /// Display robot dynamics analysis on the toolpath.
-        /// Uses frame-based scoring since robot checks depend on the
-        /// actual toolpath trajectory (angular velocity between frames).
+        /// Display robot dynamics analysis on the input geometry mesh.
+        /// Each vertex is colored by the robot score at the nearest toolpath
+        /// point. Mirrors ShowOnGeometry's visual but uses robot-side scoring.
         /// </summary>
-        public static void ShowOnToolpath(
+        public static void ShowRobotOnGeometry(
             RhinoDoc doc,
-            List<Point3d> points,
+            Brep brep,
+            Mesh inputMesh,
+            List<Point3d> toolpathPoints,
             List<Plane> frames,
-            RobotSettings robot,
-            int framesPerLayer)
+            RobotSettings robot)
         {
             ClearHeatmap(doc);
+            if (toolpathPoints == null || frames == null) return;
 
-            int count = Math.Min(points.Count, frames.Count);
-            if (count < 2) return;
-
-            var mesh = new Mesh();
-            double ribbonHalf = 1.5;
-
-            for (int i = 0; i < count; i++)
+            Mesh mesh;
+            if (inputMesh != null)
+                mesh = inputMesh.DuplicateMesh();
+            else if (brep != null)
             {
-                double score = ScoreWristVelocity(frames, points, i,
-                    robot.FeedRate, robot.MaxWristAngularVelocity);
-                Color color = ScoreToColor(score);
-
-                Point3d pt = points[i];
-                Vector3d tangent;
-                if (i == 0)
-                    tangent = points[1] - points[0];
-                else if (i == count - 1)
-                    tangent = points[count - 1] - points[count - 2];
-                else
-                    tangent = points[i + 1] - points[i - 1];
-                tangent.Unitize();
-
-                var perp = Vector3d.CrossProduct(tangent, Vector3d.ZAxis);
-                if (!perp.Unitize())
-                    perp = Vector3d.XAxis;
-
-                mesh.Vertices.Add(pt - perp * ribbonHalf);
-                mesh.Vertices.Add(pt + perp * ribbonHalf);
-                mesh.VertexColors.Add(color);
-                mesh.VertexColors.Add(color);
-
-                if (i > 0)
-                {
-                    int v = mesh.Vertices.Count;
-                    mesh.Faces.AddFace(v - 4, v - 3, v - 1, v - 2);
-                }
+                var meshes = Mesh.CreateFromBrep(brep, MeshingParameters.Default);
+                if (meshes == null || meshes.Length == 0) return;
+                mesh = new Mesh();
+                foreach (var m in meshes) mesh.Append(m);
             }
+            else return;
 
             mesh.Normals.ComputeNormals();
-            mesh.Compact();
+            mesh.VertexColors.Clear();
+
+            for (int i = 0; i < mesh.Vertices.Count; i++)
+            {
+                double score = 1.0;
+                Point3d vertPt = mesh.Vertices[i];
+                double minDist = double.MaxValue;
+                int nearest = -1;
+                // Sample every 10th point for speed (mirrors ShowCombined).
+                for (int j = 0; j < toolpathPoints.Count; j += 10)
+                {
+                    double d = vertPt.DistanceToSquared(toolpathPoints[j]);
+                    if (d < minDist)
+                    {
+                        minDist = d;
+                        nearest = j;
+                    }
+                }
+                if (nearest >= 0 && nearest < frames.Count)
+                {
+                    score = ScoreWristVelocity(frames, toolpathPoints, nearest,
+                        robot.FeedRate, robot.MaxWristAngularVelocity);
+                }
+                mesh.VertexColors.Add(ScoreToColor(score));
+            }
 
             int layerIndex = EnsureHeatmapLayer(doc);
             var attrs = new ObjectAttributes
@@ -154,7 +154,7 @@ namespace CCL_Clay3DP.Analysis
         /// <summary>
         /// Display combined (worst-of-both) heatmap on the geometry mesh.
         /// Clay scores come from vertex normals, robot scores from nearest
-        /// toolpath frame.
+        /// toolpath frame; each vertex is colored by the lower of the two.
         /// </summary>
         public static void ShowCombined(
             RhinoDoc doc,

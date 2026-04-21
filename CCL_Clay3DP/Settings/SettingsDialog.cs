@@ -31,7 +31,9 @@ namespace CCL_Clay3DP.Settings
         private NumericStepper _minBondRatio;
         private NumericStepper _materialDensity;
 
-        // Spiral fields
+        // Toolpath fields
+        private CheckBox _spiralSliceCheck;
+        private CheckBox _innerWallBracingCheck;
         private NumericStepper _layerHeight;
         private NumericStepper _radialOffset;
         private NumericStepper _startAngle;
@@ -40,9 +42,6 @@ namespace CCL_Clay3DP.Settings
         private NumericStepper _heightOffsetBottom;
         private NumericStepper _heightOffsetTop;
         private NumericStepper _ribbonWidth;
-
-        // Zigzag fields
-        private NumericStepper _zigzagNumPoints;
 
         // Robot fields
         private NumericStepper _feedRate;
@@ -99,7 +98,14 @@ namespace CCL_Clay3DP.Settings
                 },
             };
 
-            // --- Spiral Toolpath ---
+            // --- Toolpath ---
+            _spiralSliceCheck = new CheckBox { Text = "Spiral Slice (off = Layer Slice)" };
+            _spiralSliceCheck.CheckedChanged += (s, e) => UpdateToolpathFieldsEnabled();
+            _innerWallBracingCheck = new CheckBox
+            {
+                Text = "Inner Wall Bracing (Layer Slice only)"
+            };
+
             _layerHeight = CreateStepper(0.1, 50.0, 0.5, 1);
             _radialOffset = CreateStepper(-100.0, 100.0, 0.5, 1);
             _startAngle = CreateStepper(0.0, 360.0, 5.0, 0);
@@ -113,13 +119,15 @@ namespace CCL_Clay3DP.Settings
 
             var spiralGroup = new GroupBox
             {
-                Text = "Spiral Toolpath",
+                Text = "Toolpath",
                 Content = new TableLayout
                 {
                     Spacing = new Size(8, 4),
                     Padding = new Padding(8),
                     Rows =
                     {
+                        new TableRow(null, _spiralSliceCheck),
+                        new TableRow(null, _innerWallBracingCheck),
                         LabeledRow("Layer height (mm)", _layerHeight),
                         LabeledRow("Radial offset (mm)", _radialOffset),
                         LabeledRow("Start angle (deg)", _startAngle),
@@ -128,23 +136,6 @@ namespace CCL_Clay3DP.Settings
                         LabeledRow("Height offset bottom (mm)", _heightOffsetBottom),
                         LabeledRow("Height offset top (mm)", _heightOffsetTop),
                         LabeledRow("Ribbon width (mm)", _ribbonWidth),
-                    },
-                },
-            };
-
-            // --- Zigzag ---
-            _zigzagNumPoints = CreateStepper(4, 4096, 2, 0);
-
-            var zigzagGroup = new GroupBox
-            {
-                Text = "Zigzag",
-                Content = new TableLayout
-                {
-                    Spacing = new Size(8, 4),
-                    Padding = new Padding(8),
-                    Rows =
-                    {
-                        LabeledRow("Points per contour (even)", _zigzagNumPoints),
                     },
                 },
             };
@@ -221,7 +212,6 @@ namespace CCL_Clay3DP.Settings
                 {
                     new TableRow(clayGroup),
                     new TableRow(spiralGroup),
-                    new TableRow(zigzagGroup),
                     new TableRow(robotGroup),
                     new TableRow(new TableLayout
                     {
@@ -245,7 +235,9 @@ namespace CCL_Clay3DP.Settings
             _minBondRatio.Value = _settings.Clay.MinLayerBondRatio;
             _materialDensity.Value = _settings.Clay.MaterialDensity;
 
-            // Spiral
+            // Toolpath
+            _spiralSliceCheck.Checked = _settings.Helix.SpiralSlice;
+            _innerWallBracingCheck.Checked = _settings.Helix.InnerWallBracing;
             _layerHeight.Value = _settings.Helix.LayerHeight;
             _radialOffset.Value = _settings.Helix.RadialOffset;
             _startAngle.Value = _settings.Helix.StartAngle;
@@ -254,9 +246,6 @@ namespace CCL_Clay3DP.Settings
             _heightOffsetBottom.Value = _settings.Height.HeightOffsetBottom;
             _heightOffsetTop.Value = _settings.Height.HeightOffsetTop;
             _ribbonWidth.Value = _settings.Ribbon.RibbonWidth;
-
-            // Zigzag
-            _zigzagNumPoints.Value = _settings.Zigzag.NumPoints;
 
             // Robot
             _feedRate.Value = _settings.Robot.FeedRate;
@@ -275,6 +264,7 @@ namespace CCL_Clay3DP.Settings
             _projectName.Text = _settings.Robot.RoboDKProjectName;
 
             UpdateTiltFieldsEnabled();
+            UpdateToolpathFieldsEnabled();
         }
 
         private void SaveValues()
@@ -286,7 +276,9 @@ namespace CCL_Clay3DP.Settings
             _settings.Clay.MinLayerBondRatio = _minBondRatio.Value;
             _settings.Clay.MaterialDensity = _materialDensity.Value;
 
-            // Spiral
+            // Toolpath
+            _settings.Helix.SpiralSlice = _spiralSliceCheck.Checked ?? true;
+            _settings.Helix.InnerWallBracing = _innerWallBracingCheck.Checked ?? false;
             _settings.Helix.LayerHeight = _layerHeight.Value;
             _settings.Helix.RadialOffset = _radialOffset.Value;
             _settings.Helix.StartAngle = _startAngle.Value;
@@ -295,9 +287,6 @@ namespace CCL_Clay3DP.Settings
             _settings.Height.HeightOffsetBottom = _heightOffsetBottom.Value;
             _settings.Height.HeightOffsetTop = _heightOffsetTop.Value;
             _settings.Ribbon.RibbonWidth = _ribbonWidth.Value;
-
-            // Zigzag
-            _settings.Zigzag.NumPoints = (int)_zigzagNumPoints.Value;
 
             // Robot
             _settings.Robot.FeedRate = _feedRate.Value;
@@ -338,6 +327,23 @@ namespace CCL_Clay3DP.Settings
             var mode = (TiltMode)_tiltModeDropDown.SelectedIndex;
             _leadAngle.Enabled = mode == TiltMode.LeadLag;
             _verticalBias.Enabled = mode == TiltMode.VerticalBias;
+        }
+
+        /// <summary>
+        /// Gray out fields that only apply to one toolpath mode:
+        ///  - Radial offset, Start angle, Ribbon width: spiral-only → disabled when Layer Slice
+        ///  - Inner Wall Bracing: layer-slice only → disabled AND auto-unchecked when Spiral Slice
+        /// </summary>
+        private void UpdateToolpathFieldsEnabled()
+        {
+            bool spiral = _spiralSliceCheck.Checked ?? true;
+            _radialOffset.Enabled = spiral;
+            _startAngle.Enabled = spiral;
+            _ribbonWidth.Enabled = spiral;
+            _innerWallBracingCheck.Enabled = !spiral;
+            // Force-uncheck when spiraling — leaving a grayed-but-checked box
+            // is confusing and the value is ignored anyway in spiral mode.
+            if (spiral) _innerWallBracingCheck.Checked = false;
         }
 
         private static NumericStepper CreateStepper(double min, double max, double increment, int decimals)
