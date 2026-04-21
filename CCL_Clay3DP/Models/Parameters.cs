@@ -42,6 +42,18 @@ namespace CCL_Clay3DP.Models
         public double StartAngle { get; set; } = 0.0;
         public bool DirectionCCW { get; set; } = true;
         public int FramesPerLayer { get; set; } = 360;
+
+        // Toolpath mode. When true, the Slice button produces a continuous
+        // spiral (original behavior). When false, it produces discrete
+        // planar layer contours; inner-wall bracing (below) then governs
+        // whether we also emit the inner curve + zigzag structural pattern.
+        public bool SpiralSlice { get; set; } = true;
+
+        // Layer-slice only — ignored when SpiralSlice is true. Generates the
+        // inner wall curves and zigzag pattern between outer and inner as a
+        // structural bracing. FramesPerLayer also controls the zigzag point
+        // count in this mode.
+        public bool InnerWallBracing { get; set; } = false;
     }
 
     public class RibbonParameters
