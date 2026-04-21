@@ -10,10 +10,10 @@
     <Nullable>disable</Nullable>
     <ImplicitUsings>disable</ImplicitUsings>
     <!-- Versioning: alpha — not a release candidate, use at own risk -->
-    <Version>1.0.3-alpha</Version>
-    <AssemblyVersion>1.0.3.0</AssemblyVersion>
-    <FileVersion>1.0.3.0</FileVersion>
-    <InformationalVersion>1.0.3-alpha</InformationalVersion>
+    <Version>1.1.0-alpha</Version>
+    <AssemblyVersion>1.1.0.0</AssemblyVersion>
+    <FileVersion>1.1.0.0</FileVersion>
+    <InformationalVersion>1.1.0-alpha</InformationalVersion>
     <!-- License and authorship metadata, baked into the assembly -->
     <Product>CCL_Clay3DP</Product>
     <Description>Rhino 8 plugin for clay 3D printing on a Kuka robot with a Stoneflower extruder. Alpha release — use at own risk.</Description>

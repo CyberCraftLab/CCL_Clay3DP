@@ -1,6 +1,6 @@
 # CCL_Clay3DP — Rhino 8 Plugin for Clay 3D Printing
 
-**Version: Alpha 1.0.3 — NOT a release candidate. Use at your own risk.**
+**Version: Alpha 1.1.0 — NOT a release candidate. Use at your own risk.**
 
 > 🚧 This plugin is in **alpha**. It is actively used in the CCL lab but is
 > not feature-frozen, has not been independently audited, and is known to
