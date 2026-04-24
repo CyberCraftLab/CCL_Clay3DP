@@ -39,6 +39,11 @@ namespace CCL_Clay3DP.UI
         private SpiralResult _lastResult;
         private GeometrySelection _lastGeometry;
 
+        // Stash the "translated X mm to origin" note so the completion
+        // status can append it after RunSliceAndBake / RunLayerSlice
+        // overwrite the panel's status with their own progress messages.
+        private string _lastTranslationNote;
+
         // Workflow controls disabled until the user reviews Settings at least
         // once in this session. Avoids users clicking Slice with stale or
         // unconfigured params.
@@ -136,6 +141,7 @@ namespace CCL_Clay3DP.UI
             "3DP::Bracing Toolpath",
             "3DP::Bracing Vectors",
             "3DP::Clay Model",
+            "3DP::Print Position",
         };
 
         private void OnSettingsClick(object sender, EventArgs e)
@@ -349,10 +355,27 @@ namespace CCL_Clay3DP.UI
                 _lastResult = null;
             }
 
+            // Auto-translate a copy of the selection so the print lands at
+            // world origin (bbox bottom-center → 0,0,0). Original Rhino
+            // geometry is untouched. Marker layer shows physical print
+            // location.
+            double translationDistance;
+            var translation = ComputePrintingTranslation(
+                selection, out translationDistance);
+            var printingSelection = ApplyTransform(selection, translation);
+            if (doc != null)
+                BakePrintPositionMarker(doc, printingSelection);
+            string translationMsg = translationDistance < 0.001
+                ? "Geometry already at origin"
+                : $"Geometry translated {translationDistance:F1} mm to " +
+                  "origin for printing";
+            _lastTranslationNote = translationMsg;
+            SetStatus(translationMsg);
+
             if (_settings.Helix.SpiralSlice)
-                RunSliceAndBake(selection);
+                RunSliceAndBake(printingSelection);
             else
-                RunLayerSlice(selection);
+                RunLayerSlice(printingSelection);
         }
 
         private void RunSliceAndBake(GeometrySelection selection)
@@ -456,7 +479,7 @@ namespace CCL_Clay3DP.UI
 
                 Rhino.UI.StatusBar.UpdateProgressMeter(100, true);
                 Rhino.UI.StatusBar.HideProgressMeter();
-                SetStatus("Spiral slice complete");
+                SetStatus(WithTranslationNote("Spiral slice complete"));
                 SetDetail(frames.Count, 0);
             }
             catch (Exception ex)
@@ -554,6 +577,126 @@ namespace CCL_Clay3DP.UI
             var layer = doc.Layers[layerIndex];
             if (layer != null && !layer.IsDeleted)
                 layer.RenderMaterialIndex = matIdx;
+        }
+
+        // Translation that lands the input bbox bottom-center at world
+        // origin (XY centroid → 0,0; lowest Z → 0). Identity if bbox is
+        // invalid or empty. `distance` is the magnitude of the translation,
+        // used by the caller for status messages.
+        private static Transform ComputePrintingTranslation(
+            GeometrySelection sel, out double distance)
+        {
+            distance = 0.0;
+            if (sel == null) return Transform.Identity;
+            BoundingBox bbox = BoundingBox.Empty;
+            if (sel.Brep != null) bbox = sel.Brep.GetBoundingBox(true);
+            else if (sel.Mesh != null) bbox = sel.Mesh.GetBoundingBox(true);
+            if (!bbox.IsValid) return Transform.Identity;
+
+            var center = bbox.Center;
+            double dx = -center.X;
+            double dy = -center.Y;
+            double dz = -bbox.Min.Z;
+            distance = Math.Sqrt(dx * dx + dy * dy + dz * dz);
+            return Transform.Translation(new Vector3d(dx, dy, dz));
+        }
+
+        // Returns a translated copy of the selection. Originals are not
+        // modified — a Brep is duplicated and a Mesh is duplicated before
+        // Transform is applied. Identity transforms are returned as-is.
+        private static GeometrySelection ApplyTransform(
+            GeometrySelection sel, Transform xform)
+        {
+            if (sel == null) return null;
+            if (xform == Transform.Identity) return sel;
+            var result = new GeometrySelection();
+            if (sel.Brep != null)
+            {
+                var b = sel.Brep.DuplicateBrep();
+                b.Transform(xform);
+                result.Brep = b;
+            }
+            if (sel.Mesh != null)
+            {
+                var m = sel.Mesh.DuplicateMesh();
+                m.Transform(xform);
+                result.Mesh = m;
+            }
+            return result;
+        }
+
+        // Bake a visual marker showing where the print will physically land:
+        // 12 line edges around the (translated) bbox in gray, plus a small
+        // RGB axis cross at the world origin. Single dedicated layer
+        // "3DP::Print Position", visible by default.
+        private static void BakePrintPositionMarker(
+            RhinoDoc doc, GeometrySelection sel)
+        {
+            if (doc == null || sel == null) return;
+            BoundingBox bbox = BoundingBox.Empty;
+            if (sel.Brep != null) bbox = sel.Brep.GetBoundingBox(true);
+            else if (sel.Mesh != null) bbox = sel.Mesh.GetBoundingBox(true);
+            if (!bbox.IsValid) return;
+
+            int layerIdx = EnsureLayer(
+                doc, "3DP::Print Position", System.Drawing.Color.DimGray);
+            if (layerIdx < 0) return;
+            if (layerIdx < doc.Layers.Count)
+                doc.Layers[layerIdx].IsVisible = true;
+
+            var corners = bbox.GetCorners();
+            // Box corners returned by Rhino:
+            //   0 min,min,min   1 max,min,min   2 max,max,min   3 min,max,min
+            //   4 min,min,max   5 max,min,max   6 max,max,max   7 min,max,max
+            int[,] edges = new int[,]
+            {
+                { 0, 1 }, { 1, 2 }, { 2, 3 }, { 3, 0 }, // bottom
+                { 4, 5 }, { 5, 6 }, { 6, 7 }, { 7, 4 }, // top
+                { 0, 4 }, { 1, 5 }, { 2, 6 }, { 3, 7 }, // verticals
+            };
+            var bboxAttrs = new ObjectAttributes
+            {
+                LayerIndex = layerIdx,
+                Name = "PrintPositionBBox",
+            };
+            for (int i = 0; i < edges.GetLength(0); i++)
+            {
+                var line = new LineCurve(corners[edges[i, 0]], corners[edges[i, 1]]);
+                if (line.IsValid) doc.Objects.AddCurve(line, bboxAttrs);
+            }
+
+            // RGB axis cross. Length scales with bbox so it stays visible on
+            // both small and large prints, with a 20mm floor.
+            double diag = bbox.Diagonal.Length;
+            double axisLen = Math.Max(20.0, diag * 0.1);
+            var origin = Point3d.Origin;
+            var axes = new[]
+            {
+                new { Dir = new Vector3d(axisLen, 0, 0),
+                      Name = "PrintPositionAxisX",
+                      Color = System.Drawing.Color.Red },
+                new { Dir = new Vector3d(0, axisLen, 0),
+                      Name = "PrintPositionAxisY",
+                      Color = System.Drawing.Color.Green },
+                new { Dir = new Vector3d(0, 0, axisLen),
+                      Name = "PrintPositionAxisZ",
+                      Color = System.Drawing.Color.Blue },
+            };
+            foreach (var ax in axes)
+            {
+                var attrs = new ObjectAttributes
+                {
+                    LayerIndex = layerIdx,
+                    Name = ax.Name,
+                    ObjectDecoration = ObjectDecoration.EndArrowhead,
+                    ColorSource = ObjectColorSource.ColorFromObject,
+                    ObjectColor = ax.Color,
+                };
+                var line = new LineCurve(origin, origin + ax.Dir);
+                if (line.IsValid) doc.Objects.AddCurve(line, attrs);
+            }
+
+            doc.Views.Redraw();
         }
 
         private static int EnsureLayer(RhinoDoc doc, string name, System.Drawing.Color color)
@@ -808,7 +951,8 @@ namespace CCL_Clay3DP.UI
                         LayerCount = contours.Count,
                     };
 
-                    SetStatus($"Layer slice complete: {contours.Count} contours");
+                    SetStatus(WithTranslationNote(
+                        $"Layer slice complete: {contours.Count} contours"));
                     return;
                 }
 
@@ -910,9 +1054,9 @@ namespace CCL_Clay3DP.UI
                     LayerCount = goodContours.Count,
                 };
 
-                SetStatus(
+                SetStatus(WithTranslationNote(
                     $"Layer slice + bracing complete: {results.Count} layers" +
-                    (skipped > 0 ? $", {skipped} skipped" : ""));
+                    (skipped > 0 ? $", {skipped} skipped" : "")));
             }
             catch (Exception ex)
             {
@@ -1371,6 +1515,15 @@ namespace CCL_Clay3DP.UI
         {
             _statusLabel.Text = $"Status: {message}";
             RhinoApp.WriteLine($"[CCL_Clay3DP] {message}");
+        }
+
+        // Append the most recent slice's translation note to a status, then
+        // consume it so it isn't repeated on later (non-slice) status lines.
+        private string WithTranslationNote(string baseMsg)
+        {
+            string note = _lastTranslationNote;
+            _lastTranslationNote = null;
+            return string.IsNullOrEmpty(note) ? baseMsg : $"{baseMsg} — {note}";
         }
 
         private void SetDetail(int frames, int issues)
