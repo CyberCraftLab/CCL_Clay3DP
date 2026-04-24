@@ -54,6 +54,16 @@ namespace CCL_Clay3DP.Models
         // structural bracing. FramesPerLayer also controls the zigzag point
         // count in this mode.
         public bool InnerWallBracing { get; set; } = false;
+
+        // Spiral-slice only — ignored when SpiralSlice is false. When true the
+        // build plate tilts so the tool follows the spiral curve like an
+        // airplane: fuselage along the curve tangent T, wings along the
+        // underlying Brep/Mesh surface normal N, and the "tail" / tool Z axis
+        // along N × T. For vase-mode prints this keeps the plate nearly flat
+        // with a slight pitch matching the spiral rise; for sloped / curved
+        // geometry the plate banks with the surface. Off by default — current
+        // Cartesian-Z behavior preserved for existing workflows.
+        public bool SpiralFollowsCurveNormal { get; set; } = false;
     }
 
 }

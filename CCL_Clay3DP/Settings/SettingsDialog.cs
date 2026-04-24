@@ -34,6 +34,7 @@ namespace CCL_Clay3DP.Settings
         // Toolpath fields
         private CheckBox _spiralSliceCheck;
         private CheckBox _innerWallBracingCheck;
+        private CheckBox _spiralFollowsCurveNormalCheck;
         private NumericStepper _layerHeight;
         private NumericStepper _radialOffset;
         private NumericStepper _startAngle;
@@ -51,6 +52,12 @@ namespace CCL_Clay3DP.Settings
         private TextBox _roboDKExePath;
         private TextBox _stationTemplatePath;
         private TextBox _projectName;
+
+        // Set to true while we programmatically toggle the
+        // _spiralFollowsCurveNormalCheck checkbox (LoadValues, mode-switch
+        // force-uncheck, or post-warning revert) so the user-facing warning
+        // popup only fires on a genuine user click.
+        private bool _suppressSpiralNormalWarning = false;
 
         public SettingsDialog(PipelineSettings settings)
         {
@@ -101,6 +108,12 @@ namespace CCL_Clay3DP.Settings
             {
                 Text = "Inner Wall Bracing (Layer Slice only)"
             };
+            _spiralFollowsCurveNormalCheck = new CheckBox
+            {
+                Text = "Spiral follows curve normal (Spiral Slice only)"
+            };
+            _spiralFollowsCurveNormalCheck.CheckedChanged +=
+                OnSpiralFollowsCurveNormalChanged;
 
             _layerHeight = CreateStepper(0.1, 50.0, 0.5, 1);
             _radialOffset = CreateStepper(-100.0, 100.0, 0.5, 1);
@@ -121,6 +134,7 @@ namespace CCL_Clay3DP.Settings
                     {
                         new TableRow(null, _spiralSliceCheck),
                         new TableRow(null, _innerWallBracingCheck),
+                        new TableRow(null, _spiralFollowsCurveNormalCheck),
                         LabeledRow("Layer height (mm)", _layerHeight),
                         LabeledRow("Radial offset (mm)", _radialOffset),
                         LabeledRow("Start angle (deg)", _startAngle),
@@ -246,6 +260,9 @@ namespace CCL_Clay3DP.Settings
             // Toolpath
             _spiralSliceCheck.Checked = _settings.Helix.SpiralSlice;
             _innerWallBracingCheck.Checked = _settings.Helix.InnerWallBracing;
+            _suppressSpiralNormalWarning = true;
+            _spiralFollowsCurveNormalCheck.Checked = _settings.Helix.SpiralFollowsCurveNormal;
+            _suppressSpiralNormalWarning = false;
             _layerHeight.Value = _settings.Helix.LayerHeight;
             _radialOffset.Value = _settings.Helix.RadialOffset;
             _startAngle.Value = _settings.Helix.StartAngle;
@@ -283,6 +300,7 @@ namespace CCL_Clay3DP.Settings
             // Toolpath
             _settings.Helix.SpiralSlice = _spiralSliceCheck.Checked ?? true;
             _settings.Helix.InnerWallBracing = _innerWallBracingCheck.Checked ?? false;
+            _settings.Helix.SpiralFollowsCurveNormal = _spiralFollowsCurveNormalCheck.Checked ?? false;
             _settings.Helix.LayerHeight = _layerHeight.Value;
             _settings.Helix.RadialOffset = _radialOffset.Value;
             _settings.Helix.StartAngle = _startAngle.Value;
@@ -333,6 +351,7 @@ namespace CCL_Clay3DP.Settings
         /// Gray out fields that only apply to one toolpath mode:
         ///  - Radial offset, Start angle: spiral-only → disabled when Layer Slice
         ///  - Inner Wall Bracing: layer-slice only → disabled AND auto-unchecked when Spiral Slice
+        ///  - Spiral follows curve normal: spiral-only → disabled AND auto-unchecked when Layer Slice
         /// </summary>
         private void UpdateToolpathFieldsEnabled()
         {
@@ -340,9 +359,98 @@ namespace CCL_Clay3DP.Settings
             _radialOffset.Enabled = spiral;
             _startAngle.Enabled = spiral;
             _innerWallBracingCheck.Enabled = !spiral;
-            // Force-uncheck when spiraling — leaving a grayed-but-checked box
-            // is confusing and the value is ignored anyway in spiral mode.
+            _spiralFollowsCurveNormalCheck.Enabled = spiral;
+            // Force-uncheck when a checkbox is inapplicable to the current
+            // mode — leaving a grayed-but-checked box is confusing, and the
+            // value is ignored anyway in the inactive mode. Suppress the
+            // curve-normal warning popup since this is a programmatic toggle,
+            // not a user click.
             if (spiral) _innerWallBracingCheck.Checked = false;
+            if (!spiral)
+            {
+                _suppressSpiralNormalWarning = true;
+                _spiralFollowsCurveNormalCheck.Checked = false;
+                _suppressSpiralNormalWarning = false;
+            }
+        }
+
+        /// <summary>
+        /// Fired when the user toggles the "Spiral follows curve normal"
+        /// checkbox. On enable, shows a red-header WARNING modal — banking
+        /// the build plate to follow surface normals can drive the robot
+        /// into joint limits, singularities, or self-collision depending on
+        /// part geometry. If the user cancels, the checkbox is reverted.
+        /// </summary>
+        private void OnSpiralFollowsCurveNormalChanged(object sender, EventArgs e)
+        {
+            if (_suppressSpiralNormalWarning) return;
+            if (_spiralFollowsCurveNormalCheck.Checked != true) return;
+
+            if (!ConfirmSpiralCurveNormalWarning())
+            {
+                _suppressSpiralNormalWarning = true;
+                _spiralFollowsCurveNormalCheck.Checked = false;
+                _suppressSpiralNormalWarning = false;
+            }
+        }
+
+        /// <summary>
+        /// Modal warning dialog with a red, bold "W A R N I N G !" header
+        /// and Cancel as the safe default. Returns true if the user
+        /// explicitly clicks "Continue anyway".
+        /// </summary>
+        private bool ConfirmSpiralCurveNormalWarning()
+        {
+            var dlg = new Dialog<bool>
+            {
+                Title = "CCL_Clay3DP — Surface-normal tool tilt",
+                MinimumSize = new Size(480, 220),
+                Resizable = false,
+            };
+
+            var headerLabel = new Label
+            {
+                Text = "W A R N I N G !",
+                TextColor = Colors.Red,
+                Font = new Font(SystemFont.Bold, 16),
+                TextAlignment = TextAlignment.Center,
+            };
+
+            var bodyLabel = new Label
+            {
+                Text =
+                    "Review your machining path carefully in RoboDK as you " +
+                    "will likely crash your robot.\n\n" +
+                    "This is to be used with serious caution.",
+                Wrap = WrapMode.Word,
+            };
+
+            var continueBtn = new Button { Text = "Continue anyway" };
+            continueBtn.Click += (s, e) => dlg.Close(true);
+            var cancelBtn = new Button { Text = "Cancel" };
+            cancelBtn.Click += (s, e) => dlg.Close(false);
+
+            dlg.DefaultButton = cancelBtn;  // safe default — Enter cancels
+            dlg.AbortButton = cancelBtn;    // Esc cancels
+
+            dlg.Content = new TableLayout
+            {
+                Spacing = new Size(0, 14),
+                Padding = new Padding(20),
+                Rows =
+                {
+                    new TableRow(headerLabel),
+                    new TableRow(bodyLabel),
+                    null, // soak vertical space
+                    new TableRow(new TableLayout
+                    {
+                        Spacing = new Size(8, 0),
+                        Rows = { new TableRow(null, cancelBtn, continueBtn) },
+                    }),
+                },
+            };
+
+            return dlg.ShowModal(this);
         }
 
         private static NumericStepper CreateStepper(double min, double max, double increment, int decimals)

@@ -181,21 +181,38 @@ namespace CCL_Clay3DP.UI
                 RunSliceAndBake(geometryToRebuild);
 
                 // If the user has already pushed this job to RoboDK in this
-                // session, keep RoboDK in sync with the new settings without
-                // making them click Send again. Skip the confirm dialog
-                // because the user just explicitly asked for this change by
-                // saving settings.
+                // session, offer to keep RoboDK in sync with the new
+                // settings. Honor the same "is RoboDK running, confirm
+                // replacement" gate the manual Send button uses — settings
+                // changes shouldn't silently overwrite a live RoboDK session.
                 if (_hasSentToRoboDK && _lastResult != null
                     && _lastResult.Frames.Count > 0)
                 {
-                    SetStatus("Settings changed — updating RoboDK template...");
-                    RhinoApp.Wait();
-                    PerformSendToRoboDK();
+                    if (IsRoboDKRunning() && !ConfirmReplaceRoboDKSession())
+                    {
+                        SetStatus(
+                            "Settings changed — RoboDK auto-update cancelled. " +
+                            "Click Send to RoboDK when ready.");
+                    }
+                    else
+                    {
+                        SetStatus("Settings changed — updating RoboDK template...");
+                        RhinoApp.Wait();
+                        PerformSendToRoboDK();
+                    }
                 }
             }
             else
             {
                 SetStatus("Generated layers cleared — click Slice to regenerate");
+
+                // The Rhino-side toolpath was just cleared, but the RoboDK
+                // session still holds whatever was last sent. In Spiral mode
+                // we'd auto-rebuild + auto-resend; in Layer mode (or if we
+                // lost the geometry reference) we can't, so warn the user
+                // explicitly that RoboDK is now out of sync.
+                if (_hasSentToRoboDK)
+                    WarnRoboDKStaleAfterSettingsChange();
             }
         }
 
@@ -668,8 +685,16 @@ namespace CCL_Clay3DP.UI
 
                 SetStatus($"Serializing {_lastResult.Frames.Count} frames...");
 
+                // Follow-curve-normal mode only applies to Spiral toolpaths;
+                // Layer-mode frames are world-Z by construction anyway, but
+                // we gate explicitly on SpiralSlice so the flag's intent is
+                // unambiguous at the call site.
+                bool followNormal = _settings.Helix.SpiralSlice
+                    && _settings.Helix.SpiralFollowsCurveNormal;
+
                 string jsonPath = RoboDK.FrameSerializer.SerializeToFile(
-                    _lastResult.Frames, _settings.Robot, _settings.Helix.LayerHeight);
+                    _lastResult.Frames, _settings.Robot,
+                    _settings.Helix.LayerHeight, followNormal);
 
                 SetStatus("Sending to RoboDK...");
                 RhinoApp.Wait();
@@ -723,6 +748,27 @@ namespace CCL_Clay3DP.UI
                 MessageBoxType.Warning,
                 MessageBoxDefaultButton.No);
             return result == DialogResult.Yes;
+        }
+
+        /// <summary>
+        /// One-shot informational warning: settings changed and the Rhino
+        /// toolpath was cleared, but RoboDK still holds the toolpath from
+        /// the previous Send. The user must Slice + Send again to refresh
+        /// it. Fires only when auto-rebuild can't propagate (Layer mode, or
+        /// when the geometry reference was lost).
+        /// </summary>
+        private void WarnRoboDKStaleAfterSettingsChange()
+        {
+            MessageBox.Show(
+                this,
+                "Settings changed and the previous Rhino toolpath was cleared, " +
+                "but the RoboDK session still holds the toolpath from the " +
+                "previous Send.\n\n" +
+                "Click Slice and then Send to RoboDK to refresh it before " +
+                "running the next print.",
+                "CCL_Clay3DP — RoboDK out of sync",
+                MessageBoxButtons.OK,
+                MessageBoxType.Warning);
         }
 
         private void RunLayerSlice(GeometrySelection selection)

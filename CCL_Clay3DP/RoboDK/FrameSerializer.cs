@@ -25,19 +25,40 @@ namespace CCL_Clay3DP.RoboDK
         /// <summary>
         /// Serialize frames as 6xN curve data (x,y,z,i,j,k per point)
         /// plus all robot settings that need to be propagated to RoboDK.
-        /// Normals point along Z-axis (nozzle is fixed vertical,
-        /// robot holds the build plate).
+        ///
+        /// The per-point normal (i,j,k) is the vector RoboDK aligns the tool
+        /// Z-axis to at each target. With the nozzle fixed vertical and the
+        /// build plate held by the robot, that vector drives how the plate
+        /// is oriented at each spiral point.
+        ///
+        /// <paramref name="followCurveNormal"/> controls which direction is
+        /// written:
+        ///   false → (0,0,1) world Z, build plate stays flat (default).
+        ///   true  → frame.YAxis = N × T, the "airplane tail" direction of
+        ///           the Darboux frame. Plate banks with the surface while
+        ///           staying mostly vertical for vase-mode spirals.
         /// </summary>
         public static string SerializeToFile(List<Plane> frames, RobotSettings robot,
-            double layerHeight)
+            double layerHeight, bool followCurveNormal)
         {
             var points = new List<double[]>();
             foreach (var frame in frames)
             {
+                double nx, ny, nz;
+                if (followCurveNormal)
+                {
+                    nx = frame.YAxis.X;
+                    ny = frame.YAxis.Y;
+                    nz = frame.YAxis.Z;
+                }
+                else
+                {
+                    nx = 0.0; ny = 0.0; nz = 1.0;
+                }
                 points.Add(new[]
                 {
                     frame.Origin.X, frame.Origin.Y, frame.Origin.Z,
-                    0.0, 0.0, 1.0,
+                    nx, ny, nz,
                 });
             }
 
