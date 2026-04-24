@@ -174,7 +174,7 @@ namespace CCL_Clay3DP.UI
             {
                 // Auto-rebuild only makes sense for Spiral Slice — the Layer
                 // Slice flow can be interactive (flip + distance prompts when
-                // Inner Wall Bracing is on), so we leave it for the user to
+                // Outer Wall Bracing is on), so we leave it for the user to
                 // kick off with the Slice button.
                 SetStatus("Settings changed — regenerating spiral...");
                 RhinoApp.Wait();
@@ -776,7 +776,7 @@ namespace CCL_Clay3DP.UI
             try
             {
                 double layerHeight = _settings.Helix.LayerHeight;
-                bool bracing = _settings.Helix.InnerWallBracing;
+                bool bracing = _settings.Helix.OuterWallBracing;
 
                 SetStatus($"Layer slice: slicing at {layerHeight} mm...");
                 RhinoApp.Wait();
@@ -812,7 +812,7 @@ namespace CCL_Clay3DP.UI
                     return;
                 }
 
-                // Inner Wall Bracing: preview inward arrows so the user can
+                // Outer Wall Bracing: preview inward arrows so the user can
                 // flip the side before picking the offset distance.
                 int numPoints = _settings.Helix.FramesPerLayer;
                 const double previewArrowLength = 5.0;
@@ -887,21 +887,18 @@ namespace CCL_Clay3DP.UI
                 BakeZigzagStack(goodContours, results, flipInward);
 
                 // Robot print order per layer (bottom to top):
-                //   Inner Toolpath → Outer Toolpath → Bracing Toolpath
-                // The flip swaps which underlying curve ends up on which
-                // named layer, so the print order follows suit.
+                //   Outer Toolpath → Bracing Toolpath
+                // The geometrically inner curve was used to anchor the
+                // bracing geometry but is neither baked nor printed.
+                // Flip swaps which underlying curve is the geometrically
+                // outer one, so the print follows suit.
                 var layerPts = new List<Point3d>();
                 for (int i = 0; i < goodContours.Count; i++)
                 {
-                    var innerLayerCurve = flipInward
-                        ? goodContours[i]
-                        : results[i].InnerCurve;
                     var outerLayerCurve = flipInward
                         ? results[i].InnerCurve
                         : goodContours[i];
 
-                    if (innerLayerCurve != null)
-                        AddCurvePoints(innerLayerCurve, layerPts);
                     if (outerLayerCurve != null)
                         AddCurvePoints(outerLayerCurve, layerPts);
                     if (results[i].Zigzag != null)
@@ -1022,8 +1019,6 @@ namespace CCL_Clay3DP.UI
 
             int outerToolpathLayer = EnsureLayer(doc, "3DP::Outer Toolpath",
                 System.Drawing.Color.FromArgb(180, 180, 180));
-            int innerToolpathLayer = EnsureLayer(doc, "3DP::Inner Toolpath",
-                System.Drawing.Color.FromArgb(80, 120, 220));
             int outerPtsLayer = EnsureLayer(doc, "3DP::Bracing Outer Points",
                 System.Drawing.Color.FromArgb(40, 40, 40));
             int innerPtsLayer = EnsureLayer(doc, "3DP::Bracing Inner Points",
@@ -1033,16 +1028,12 @@ namespace CCL_Clay3DP.UI
             int arrowLayer = EnsureLayer(doc, "3DP::Bracing Vectors",
                 System.Drawing.Color.FromArgb(220, 40, 40));
 
-            // When flipped, the projected curve is geometrically OUTSIDE the
-            // original slice. Swap the layer/name assignments for both curves
-            // and their sample points so "Outer Toolpath" always holds the
-            // geometrically outer data and "Inner Toolpath" the inner data.
-            int sliceCurveTarget = flipInward ? innerToolpathLayer : outerToolpathLayer;
-            int projectedCurveTarget = flipInward ? outerToolpathLayer : innerToolpathLayer;
+            // We only bake the outer toolpath (and bracing); the projected
+            // inner curve is computed for bracing geometry but not printed
+            // and not baked. Flip swaps which underlying curve is the
+            // geometrically outer one, and which set of points is which.
             int slicePointsTarget = flipInward ? innerPtsLayer : outerPtsLayer;
             int projectedPointsTarget = flipInward ? outerPtsLayer : innerPtsLayer;
-            string sliceCurveName = flipInward ? "InnerToolpath" : "OuterToolpath";
-            string projectedCurveName = flipInward ? "OuterToolpath" : "InnerToolpath";
             string slicePointsName = flipInward ? "BracingInnerPoint" : "BracingOuterPoint";
             string projectedPointsName = flipInward ? "BracingOuterPoint" : "BracingInnerPoint";
 
@@ -1053,11 +1044,16 @@ namespace CCL_Clay3DP.UI
                 var contour = contours[i];
                 var r = results[i];
 
-                if (contour != null && contour.IsValid)
+                // Bake whichever curve is geometrically outer to the Outer
+                // Toolpath layer. The geometrically inner curve (slice when
+                // flipped, projected otherwise) is dropped — only the outer
+                // wall + the bracing pattern get printed.
+                Curve outerCurve = flipInward ? r.InnerCurve : contour;
+                if (outerCurve != null && outerCurve.IsValid)
                 {
-                    attrs.LayerIndex = sliceCurveTarget;
-                    attrs.Name = sliceCurveName;
-                    doc.Objects.AddCurve(contour, attrs);
+                    attrs.LayerIndex = outerToolpathLayer;
+                    attrs.Name = "OuterToolpath";
+                    doc.Objects.AddCurve(outerCurve, attrs);
                 }
 
                 attrs.LayerIndex = slicePointsTarget;
@@ -1067,13 +1063,6 @@ namespace CCL_Clay3DP.UI
                 attrs.LayerIndex = projectedPointsTarget;
                 attrs.Name = projectedPointsName;
                 foreach (var p in r.InnerPoints) doc.Objects.AddPoint(p, attrs);
-
-                if (r.InnerCurve != null && r.InnerCurve.IsValid)
-                {
-                    attrs.LayerIndex = projectedCurveTarget;
-                    attrs.Name = projectedCurveName;
-                    doc.Objects.AddCurve(r.InnerCurve, attrs);
-                }
 
                 // Inward-direction arrows: one LineCurve per sample point,
                 // with EndArrowhead decoration. Always points from slice
@@ -1101,12 +1090,10 @@ namespace CCL_Clay3DP.UI
                 }
             }
 
-            // Both toolpath layers visible — they're the real output.
-            // Point and arrow helpers hidden by default.
+            // Outer toolpath visible — real print path. Point and arrow
+            // helpers hidden by default.
             if (outerToolpathLayer >= 0 && outerToolpathLayer < doc.Layers.Count)
                 doc.Layers[outerToolpathLayer].IsVisible = true;
-            if (innerToolpathLayer >= 0 && innerToolpathLayer < doc.Layers.Count)
-                doc.Layers[innerToolpathLayer].IsVisible = true;
             if (outerPtsLayer >= 0 && outerPtsLayer < doc.Layers.Count)
                 doc.Layers[outerPtsLayer].IsVisible = false;
             if (innerPtsLayer >= 0 && innerPtsLayer < doc.Layers.Count)

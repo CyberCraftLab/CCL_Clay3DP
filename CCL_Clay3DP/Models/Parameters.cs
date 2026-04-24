@@ -49,11 +49,11 @@ namespace CCL_Clay3DP.Models
         // whether we also emit the inner curve + zigzag structural pattern.
         public bool SpiralSlice { get; set; } = true;
 
-        // Layer-slice only — ignored when SpiralSlice is true. Generates the
-        // inner wall curves and zigzag pattern between outer and inner as a
-        // structural bracing. FramesPerLayer also controls the zigzag point
-        // count in this mode.
-        public bool InnerWallBracing { get; set; } = false;
+        // Layer-slice only — ignored when SpiralSlice is true. Generates a
+        // zigzag bracing pattern attached to the outer wall, anchored to a
+        // virtual inner offset (computed but neither baked nor printed).
+        // FramesPerLayer also controls the zigzag point count in this mode.
+        public bool OuterWallBracing { get; set; } = false;
 
         // Spiral-slice only — ignored when SpiralSlice is false. When true the
         // build plate tilts so the tool follows the spiral curve like an

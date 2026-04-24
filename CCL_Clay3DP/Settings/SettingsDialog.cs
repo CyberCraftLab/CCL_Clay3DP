@@ -33,7 +33,7 @@ namespace CCL_Clay3DP.Settings
 
         // Toolpath fields
         private CheckBox _spiralSliceCheck;
-        private CheckBox _innerWallBracingCheck;
+        private CheckBox _outerWallBracingCheck;
         private CheckBox _spiralFollowsCurveNormalCheck;
         private NumericStepper _layerHeight;
         private NumericStepper _radialOffset;
@@ -104,9 +104,9 @@ namespace CCL_Clay3DP.Settings
             // --- Toolpath ---
             _spiralSliceCheck = new CheckBox { Text = "Spiral Slice (off = Layer Slice)" };
             _spiralSliceCheck.CheckedChanged += (s, e) => UpdateToolpathFieldsEnabled();
-            _innerWallBracingCheck = new CheckBox
+            _outerWallBracingCheck = new CheckBox
             {
-                Text = "Inner Wall Bracing (Layer Slice only)"
+                Text = "Outer Wall Bracing (Layer Slice only)"
             };
             _spiralFollowsCurveNormalCheck = new CheckBox
             {
@@ -133,7 +133,7 @@ namespace CCL_Clay3DP.Settings
                     Rows =
                     {
                         new TableRow(null, _spiralSliceCheck),
-                        new TableRow(null, _innerWallBracingCheck),
+                        new TableRow(null, _outerWallBracingCheck),
                         new TableRow(null, _spiralFollowsCurveNormalCheck),
                         LabeledRow("Layer height (mm)", _layerHeight),
                         LabeledRow("Radial offset (mm)", _radialOffset),
@@ -259,7 +259,7 @@ namespace CCL_Clay3DP.Settings
 
             // Toolpath
             _spiralSliceCheck.Checked = _settings.Helix.SpiralSlice;
-            _innerWallBracingCheck.Checked = _settings.Helix.InnerWallBracing;
+            _outerWallBracingCheck.Checked = _settings.Helix.OuterWallBracing;
             _suppressSpiralNormalWarning = true;
             _spiralFollowsCurveNormalCheck.Checked = _settings.Helix.SpiralFollowsCurveNormal;
             _suppressSpiralNormalWarning = false;
@@ -299,7 +299,7 @@ namespace CCL_Clay3DP.Settings
 
             // Toolpath
             _settings.Helix.SpiralSlice = _spiralSliceCheck.Checked ?? true;
-            _settings.Helix.InnerWallBracing = _innerWallBracingCheck.Checked ?? false;
+            _settings.Helix.OuterWallBracing = _outerWallBracingCheck.Checked ?? false;
             _settings.Helix.SpiralFollowsCurveNormal = _spiralFollowsCurveNormalCheck.Checked ?? false;
             _settings.Helix.LayerHeight = _layerHeight.Value;
             _settings.Helix.RadialOffset = _radialOffset.Value;
@@ -350,7 +350,7 @@ namespace CCL_Clay3DP.Settings
         /// <summary>
         /// Gray out fields that only apply to one toolpath mode:
         ///  - Radial offset, Start angle: spiral-only → disabled when Layer Slice
-        ///  - Inner Wall Bracing: layer-slice only → disabled AND auto-unchecked when Spiral Slice
+        ///  - Outer Wall Bracing: layer-slice only → disabled AND auto-unchecked when Spiral Slice
         ///  - Spiral follows curve normal: spiral-only → disabled AND auto-unchecked when Layer Slice
         /// </summary>
         private void UpdateToolpathFieldsEnabled()
@@ -358,14 +358,14 @@ namespace CCL_Clay3DP.Settings
             bool spiral = _spiralSliceCheck.Checked ?? true;
             _radialOffset.Enabled = spiral;
             _startAngle.Enabled = spiral;
-            _innerWallBracingCheck.Enabled = !spiral;
+            _outerWallBracingCheck.Enabled = !spiral;
             _spiralFollowsCurveNormalCheck.Enabled = spiral;
             // Force-uncheck when a checkbox is inapplicable to the current
             // mode — leaving a grayed-but-checked box is confusing, and the
             // value is ignored anyway in the inactive mode. Suppress the
             // curve-normal warning popup since this is a programmatic toggle,
             // not a user click.
-            if (spiral) _innerWallBracingCheck.Checked = false;
+            if (spiral) _outerWallBracingCheck.Checked = false;
             if (!spiral)
             {
                 _suppressSpiralNormalWarning = true;
