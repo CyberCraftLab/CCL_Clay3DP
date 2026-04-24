@@ -888,19 +888,15 @@ namespace CCL_Clay3DP.UI
 
                 // Robot print order per layer (bottom to top):
                 //   Outer Toolpath → Bracing Toolpath
-                // The geometrically inner curve was used to anchor the
-                // bracing geometry but is neither baked nor printed.
-                // Flip swaps which underlying curve is the geometrically
-                // outer one, so the print follows suit.
+                // The Outer Wall is always the slice contour, regardless
+                // of flip direction. The projected curve (inward or outward
+                // depending on flip) is just the bracing's anchor — neither
+                // baked nor printed.
                 var layerPts = new List<Point3d>();
                 for (int i = 0; i < goodContours.Count; i++)
                 {
-                    var outerLayerCurve = flipInward
-                        ? results[i].InnerCurve
-                        : goodContours[i];
-
-                    if (outerLayerCurve != null)
-                        AddCurvePoints(outerLayerCurve, layerPts);
+                    if (goodContours[i] != null)
+                        AddCurvePoints(goodContours[i], layerPts);
                     if (results[i].Zigzag != null)
                         AddCurvePoints(results[i].Zigzag, layerPts);
                 }
@@ -1044,16 +1040,16 @@ namespace CCL_Clay3DP.UI
                 var contour = contours[i];
                 var r = results[i];
 
-                // Bake whichever curve is geometrically outer to the Outer
-                // Toolpath layer. The geometrically inner curve (slice when
-                // flipped, projected otherwise) is dropped — only the outer
-                // wall + the bracing pattern get printed.
-                Curve outerCurve = flipInward ? r.InnerCurve : contour;
-                if (outerCurve != null && outerCurve.IsValid)
+                // The Outer Wall is ALWAYS the slice contour (= the input
+                // Brep/Mesh's actual outline at this Z). Flip only changes
+                // which side the bracing extends to (inward by default,
+                // outward when flipped) — it doesn't change which curve
+                // is the outer wall.
+                if (contour != null && contour.IsValid)
                 {
                     attrs.LayerIndex = outerToolpathLayer;
                     attrs.Name = "OuterToolpath";
-                    doc.Objects.AddCurve(outerCurve, attrs);
+                    doc.Objects.AddCurve(contour, attrs);
                 }
 
                 attrs.LayerIndex = slicePointsTarget;
