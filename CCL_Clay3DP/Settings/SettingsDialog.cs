@@ -203,6 +203,12 @@ namespace CCL_Clay3DP.Settings
             var cancelButton = new Button { Text = "Cancel" };
             cancelButton.Click += (s, e) => Close(false);
 
+            var importButton = new Button { Text = "Import..." };
+            importButton.Click += OnImportClick;
+
+            var exportButton = new Button { Text = "Export..." };
+            exportButton.Click += OnExportClick;
+
             DefaultButton = okButton;
             AbortButton = cancelButton;
 
@@ -232,7 +238,10 @@ namespace CCL_Clay3DP.Settings
             var buttonRow = new TableLayout
             {
                 Spacing = new Size(8, 0),
-                Rows = { new TableRow(null, cancelButton, okButton) },
+                Rows =
+                {
+                    new TableRow(importButton, exportButton, null, cancelButton, okButton),
+                },
             };
 
             Content = new TableLayout
@@ -290,6 +299,15 @@ namespace CCL_Clay3DP.Settings
 
         private void SaveValues()
         {
+            ApplyDialogToSettings();
+            SettingsManager.Save(_settings);
+        }
+
+        // Copy every dialog field into _settings without touching disk.
+        // OK button writes _settings to the global config; Export writes
+        // it to a user-chosen path. Both share this mutation step.
+        private void ApplyDialogToSettings()
+        {
             // Clay
             _settings.Clay.PresetName = _presetDropDown.SelectedValue?.ToString() ?? "Custom";
             _settings.Clay.BeadDiameter = _beadDiameter.Value;
@@ -318,8 +336,6 @@ namespace CCL_Clay3DP.Settings
             _settings.Robot.RoboDKExecutablePath = _roboDKExePath.Text;
             _settings.Robot.RoboDKStationTemplatePath = _stationTemplatePath.Text;
             _settings.Robot.RoboDKProjectName = _projectName.Text;
-
-            SettingsManager.Save(_settings);
         }
 
         private void OnPresetChanged(object sender, EventArgs e)
@@ -490,6 +506,70 @@ namespace CCL_Clay3DP.Settings
             dialog.Filters.Add(new FileFilter(filterName, filterExt));
             if (dialog.ShowDialog(this) == DialogResult.Ok)
                 target.Text = dialog.FileName;
+        }
+
+        // Bake current dialog values into _settings, then write that
+        // snapshot to a user-chosen JSON file. Strictly side-effect-free
+        // for the global config — the user must still click OK to persist.
+        private void OnExportClick(object sender, EventArgs e)
+        {
+            ApplyDialogToSettings();
+
+            var sfd = new SaveFileDialog
+            {
+                Title = "Export CCL_Clay3DP Settings",
+                FileName = "ccl_clay3dp_settings.json",
+            };
+            sfd.Filters.Add(new FileFilter("Settings (*.json)", "*.json"));
+            if (sfd.ShowDialog(this) != DialogResult.Ok) return;
+
+            string path = sfd.FileName;
+            // Eto on some platforms doesn't auto-append the filter extension.
+            if (!path.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+                path += ".json";
+
+            try
+            {
+                SettingsManager.SaveTo(_settings, path);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this,
+                    $"Could not write settings file:\n{ex.Message}",
+                    "Export failed", MessageBoxType.Error);
+            }
+        }
+
+        // Read settings from a user-chosen JSON file into _settings, then
+        // refresh every dialog field from those values. Imported values are
+        // pending until the user clicks OK.
+        private void OnImportClick(object sender, EventArgs e)
+        {
+            var ofd = new OpenFileDialog
+            {
+                Title = "Import CCL_Clay3DP Settings",
+            };
+            ofd.Filters.Add(new FileFilter("Settings (*.json)", "*.json"));
+            if (ofd.ShowDialog(this) != DialogResult.Ok) return;
+
+            PipelineSettings loaded;
+            try
+            {
+                loaded = SettingsManager.LoadFrom(ofd.FileName);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this,
+                    $"Could not read settings file:\n{ex.Message}",
+                    "Import failed", MessageBoxType.Error);
+                return;
+            }
+
+            _settings.Clay = loaded.Clay;
+            _settings.Height = loaded.Height;
+            _settings.Helix = loaded.Helix;
+            _settings.Robot = loaded.Robot;
+            LoadValues();
         }
     }
 }

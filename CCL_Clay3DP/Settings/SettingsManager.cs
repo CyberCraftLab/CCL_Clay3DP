@@ -49,9 +49,7 @@ namespace CCL_Clay3DP.Settings
 
             try
             {
-                string json = File.ReadAllText(ConfigFile);
-                return JsonConvert.DeserializeObject<PipelineSettings>(json, JsonSettings)
-                       ?? new PipelineSettings();
+                return LoadFrom(ConfigFile);
             }
             catch
             {
@@ -64,8 +62,25 @@ namespace CCL_Clay3DP.Settings
             if (!Directory.Exists(ConfigDir))
                 Directory.CreateDirectory(ConfigDir);
 
+            SaveTo(settings, ConfigFile);
+        }
+
+        // Read settings from an arbitrary path. Throws on IO or parse
+        // errors so callers can surface a meaningful message to the user.
+        public static PipelineSettings LoadFrom(string path)
+        {
+            string json = File.ReadAllText(path);
+            return JsonConvert.DeserializeObject<PipelineSettings>(json, JsonSettings)
+                   ?? new PipelineSettings();
+        }
+
+        // Write settings to an arbitrary path. Caller is responsible for
+        // ensuring the destination directory exists. Used by the Export
+        // button in SettingsDialog; does not touch the global config.
+        public static void SaveTo(PipelineSettings settings, string path)
+        {
             string json = JsonConvert.SerializeObject(settings, JsonSettings);
-            File.WriteAllText(ConfigFile, json);
+            File.WriteAllText(path, json);
         }
 
         /// <summary>
