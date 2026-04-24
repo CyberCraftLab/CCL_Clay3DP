@@ -22,7 +22,6 @@ namespace CCL_Clay3DP.Core
         public List<Point3d> ToolpathPoints { get; set; } = new List<Point3d>();
         public List<Plane> Frames { get; set; } = new List<Plane>();
         public Curve SpiralCurve { get; set; }
-        public Mesh RibbonMesh { get; set; }
         public List<Curve> Contours { get; set; } = new List<Curve>();
         public Curve AxisCurve { get; set; }
         public double TotalHeight { get; set; }

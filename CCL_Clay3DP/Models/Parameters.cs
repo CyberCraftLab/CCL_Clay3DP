@@ -56,10 +56,4 @@ namespace CCL_Clay3DP.Models
         public bool InnerWallBracing { get; set; } = false;
     }
 
-    public class RibbonParameters
-    {
-        public bool NormalOutward { get; set; } = true;
-        public double RibbonWidth { get; set; } = 5.0;
-        public bool HideBoundingCylinder { get; set; } = true;
-    }
 }

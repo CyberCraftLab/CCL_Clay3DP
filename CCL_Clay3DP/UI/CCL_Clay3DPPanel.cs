@@ -128,7 +128,6 @@ namespace CCL_Clay3DP.UI
         {
             "3DP::Contours",
             "3DP::Spiral Toolpath",
-            "3DP::Ribbon",
             "3DP::Heatmap",
             "3DP::Outer Toolpath",
             "3DP::Bracing Outer Points",
@@ -402,27 +401,24 @@ namespace CCL_Clay3DP.UI
                 reportProgress(0.1);
                 SetStatus($"Computing {spiralPoints.Count} frames...");
 
-                // 4) Compute frames
+                // 4) Compute frames — outward surface normal is the only
+                // sensible default for clay printing (extruder approaches the
+                // surface from outside). Hard-coded since the option was never
+                // used and it complicated the settings UI.
                 var frames = FrameComputer.ComputeFrames(
                     spiralPoints,
                     selection.Brep,
                     selection.Mesh,
-                    _settings.Ribbon.NormalOutward,
+                    normalOutward: true,
                     reportProgress);
 
                 // 5) Create spiral curve
-                Rhino.UI.StatusBar.UpdateProgressMeter(80, true);
-                Rhino.UI.StatusBar.SetMessagePane("CCL_Clay3DP: 80% — Creating spiral curve...");
+                Rhino.UI.StatusBar.UpdateProgressMeter(85, true);
+                Rhino.UI.StatusBar.SetMessagePane("CCL_Clay3DP: 85% — Creating spiral curve...");
                 RhinoApp.Wait();
                 var spiralCurve = SpiralInterpolator.CreateSpiralCurve(spiralPoints);
 
-                // 6) Generate ribbon mesh
-                Rhino.UI.StatusBar.UpdateProgressMeter(90, true);
-                Rhino.UI.StatusBar.SetMessagePane("CCL_Clay3DP: 90% — Generating ribbon...");
-                RhinoApp.Wait();
-                var ribbon = FrameComputer.GenerateRibbonMesh(frames, _settings.Ribbon.RibbonWidth);
-
-                // 7) Prepare to bake
+                // 6) Prepare to bake
                 Rhino.UI.StatusBar.UpdateProgressMeter(95, true);
                 Rhino.UI.StatusBar.SetMessagePane("CCL_Clay3DP: 95% — Baking to document...");
                 RhinoApp.Wait();
@@ -434,7 +430,6 @@ namespace CCL_Clay3DP.UI
                     ToolpathPoints = spiralPoints,
                     Frames = frames,
                     SpiralCurve = spiralCurve,
-                    RibbonMesh = ribbon,
                     Contours = contours,
                     LayerCount = contours.Count,
                 };
@@ -462,11 +457,11 @@ namespace CCL_Clay3DP.UI
 
             // Contours are intermediate data used to compute the spiral; we
             // no longer bake them — the user doesn't need them in the layer
-            // panel. The SpiralCurve is the actual toolpath output.
+            // panel. The SpiralCurve is the actual toolpath output. The
+            // ribbon mesh viz was retired too — frames are still computed
+            // and sent to RoboDK, just not baked as a visual aid.
             int spiralLayer = EnsureLayer(doc, "3DP::Spiral Toolpath",
                 System.Drawing.Color.FromArgb(255, 0, 0));
-            int ribbonLayer = EnsureLayer(doc, "3DP::Ribbon",
-                System.Drawing.Color.FromArgb(255, 255, 255));
 
             var attrs = new ObjectAttributes();
 
@@ -477,19 +472,6 @@ namespace CCL_Clay3DP.UI
                 attrs.Name = "SpiralToolpath";
                 doc.Objects.AddCurve(result.SpiralCurve, attrs);
             }
-
-            // Bake ribbon
-            if (result.RibbonMesh != null && result.RibbonMesh.IsValid)
-            {
-                attrs.LayerIndex = ribbonLayer;
-                attrs.Name = "Ribbon";
-                doc.Objects.AddMesh(result.RibbonMesh, attrs);
-            }
-
-            // Ribbon layer is off by default — it's a debug visual that the
-            // user can toggle on if they want to inspect tool orientation.
-            if (ribbonLayer >= 0 && ribbonLayer < doc.Layers.Count)
-                doc.Layers[ribbonLayer].IsVisible = false;
 
             doc.Views.Redraw();
         }

@@ -39,13 +39,9 @@ namespace CCL_Clay3DP.Settings
         private NumericStepper _startAngle;
         private DropDown _directionDropDown;
         private NumericStepper _framesPerLayer;
-        private NumericStepper _heightOffsetBottom;
-        private NumericStepper _heightOffsetTop;
-        private NumericStepper _ribbonWidth;
 
         // Robot fields
         private NumericStepper _feedRate;
-        private NumericStepper _travelSpeed;
         private DropDown _tiltModeDropDown;
         private NumericStepper _leadAngle;
         private NumericStepper _verticalBias;
@@ -113,9 +109,6 @@ namespace CCL_Clay3DP.Settings
             _directionDropDown.Items.Add("CCW");
             _directionDropDown.Items.Add("CW");
             _framesPerLayer = CreateStepper(36, 3600, 36, 0);
-            _heightOffsetBottom = CreateStepper(0.0, 1000.0, 1.0, 1);
-            _heightOffsetTop = CreateStepper(0.0, 1000.0, 1.0, 1);
-            _ribbonWidth = CreateStepper(0.1, 100.0, 0.5, 1);
 
             var spiralGroup = new GroupBox
             {
@@ -133,16 +126,12 @@ namespace CCL_Clay3DP.Settings
                         LabeledRow("Start angle (deg)", _startAngle),
                         LabeledRow("Direction", _directionDropDown),
                         LabeledRow("Frames per layer", _framesPerLayer),
-                        LabeledRow("Height offset bottom (mm)", _heightOffsetBottom),
-                        LabeledRow("Height offset top (mm)", _heightOffsetTop),
-                        LabeledRow("Ribbon width (mm)", _ribbonWidth),
                     },
                 },
             };
 
             // --- Robot / Printer ---
             _feedRate = CreateStepper(1.0, 500.0, 10.0, 1);
-            _travelSpeed = CreateStepper(1.0, 500.0, 10.0, 1);
             _tiltModeDropDown = new DropDown();
             _tiltModeDropDown.Items.Add("Normal");
             _tiltModeDropDown.Items.Add("Lead-Lag");
@@ -176,7 +165,6 @@ namespace CCL_Clay3DP.Settings
                     Rows =
                     {
                         LabeledRow("Feed rate (mm/s)", _feedRate),
-                        LabeledRow("Travel speed (mm/s)", _travelSpeed),
                         LabeledRow("Tilt mode", _tiltModeDropDown),
                         LabeledRow("Lead angle (deg)", _leadAngle),
                         LabeledRow("Vertical bias (0-1)", _verticalBias),
@@ -204,23 +192,43 @@ namespace CCL_Clay3DP.Settings
             DefaultButton = okButton;
             AbortButton = cancelButton;
 
+            // The settings groups go inside a Scrollable so smaller laptop
+            // displays get scrollbars instead of having the OK/Cancel row
+            // pushed off-screen. The button row sits OUTSIDE the Scrollable
+            // so it stays visible regardless of how the user scrolls.
+            var scrollableContent = new Scrollable
+            {
+                Border = BorderType.None,
+                ExpandContentWidth = true,
+                ExpandContentHeight = false,
+                Content = new TableLayout
+                {
+                    Spacing = new Size(0, 8),
+                    Padding = new Padding(0),
+                    Rows =
+                    {
+                        new TableRow(clayGroup),
+                        new TableRow(spiralGroup),
+                        new TableRow(robotGroup),
+                        null, // soak any extra vertical space inside the scroller
+                    },
+                },
+            };
+
+            var buttonRow = new TableLayout
+            {
+                Spacing = new Size(8, 0),
+                Rows = { new TableRow(null, cancelButton, okButton) },
+            };
+
             Content = new TableLayout
             {
                 Spacing = new Size(0, 8),
                 Padding = new Padding(12),
                 Rows =
                 {
-                    new TableRow(clayGroup),
-                    new TableRow(spiralGroup),
-                    new TableRow(robotGroup),
-                    new TableRow(new TableLayout
-                    {
-                        Spacing = new Size(8, 0),
-                        Rows =
-                        {
-                            new TableRow(null, cancelButton, okButton),
-                        },
-                    }),
+                    new TableRow(new TableCell(scrollableContent, true)) { ScaleHeight = true },
+                    new TableRow(buttonRow),
                 },
             };
         }
@@ -243,13 +251,9 @@ namespace CCL_Clay3DP.Settings
             _startAngle.Value = _settings.Helix.StartAngle;
             _directionDropDown.SelectedIndex = _settings.Helix.DirectionCCW ? 0 : 1;
             _framesPerLayer.Value = _settings.Helix.FramesPerLayer;
-            _heightOffsetBottom.Value = _settings.Height.HeightOffsetBottom;
-            _heightOffsetTop.Value = _settings.Height.HeightOffsetTop;
-            _ribbonWidth.Value = _settings.Ribbon.RibbonWidth;
 
             // Robot
             _feedRate.Value = _settings.Robot.FeedRate;
-            _travelSpeed.Value = _settings.Robot.TravelSpeed;
             _tiltModeDropDown.SelectedIndex = (int)_settings.Robot.TiltMode;
             _leadAngle.Value = _settings.Robot.LeadAngle;
             _verticalBias.Value = _settings.Robot.VerticalBias;
@@ -284,13 +288,9 @@ namespace CCL_Clay3DP.Settings
             _settings.Helix.StartAngle = _startAngle.Value;
             _settings.Helix.DirectionCCW = _directionDropDown.SelectedIndex == 0;
             _settings.Helix.FramesPerLayer = (int)_framesPerLayer.Value;
-            _settings.Height.HeightOffsetBottom = _heightOffsetBottom.Value;
-            _settings.Height.HeightOffsetTop = _heightOffsetTop.Value;
-            _settings.Ribbon.RibbonWidth = _ribbonWidth.Value;
 
             // Robot
             _settings.Robot.FeedRate = _feedRate.Value;
-            _settings.Robot.TravelSpeed = _travelSpeed.Value;
             _settings.Robot.TiltMode = (TiltMode)_tiltModeDropDown.SelectedIndex;
             _settings.Robot.LeadAngle = _leadAngle.Value;
             _settings.Robot.VerticalBias = _verticalBias.Value;
@@ -331,7 +331,7 @@ namespace CCL_Clay3DP.Settings
 
         /// <summary>
         /// Gray out fields that only apply to one toolpath mode:
-        ///  - Radial offset, Start angle, Ribbon width: spiral-only → disabled when Layer Slice
+        ///  - Radial offset, Start angle: spiral-only → disabled when Layer Slice
         ///  - Inner Wall Bracing: layer-slice only → disabled AND auto-unchecked when Spiral Slice
         /// </summary>
         private void UpdateToolpathFieldsEnabled()
@@ -339,7 +339,6 @@ namespace CCL_Clay3DP.Settings
             bool spiral = _spiralSliceCheck.Checked ?? true;
             _radialOffset.Enabled = spiral;
             _startAngle.Enabled = spiral;
-            _ribbonWidth.Enabled = spiral;
             _innerWallBracingCheck.Enabled = !spiral;
             // Force-uncheck when spiraling — leaving a grayed-but-checked box
             // is confusing and the value is ignored anyway in spiral mode.
