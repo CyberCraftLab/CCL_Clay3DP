@@ -61,8 +61,8 @@ namespace CCL_Clay3DP.UI
             var sliceButton = new Button { Text = "1. Slice" };
             sliceButton.Click += OnSliceClick;
 
-            var pipesButton = new Button { Text = "Pipes" };
-            pipesButton.Click += OnPipesClick;
+            var previewClayModelButton = new Button { Text = "Preview Clay Model" };
+            previewClayModelButton.Click += OnPreviewClayModelClick;
 
             _analysisChannel = new DropDown();
             _analysisChannel.Items.Add("Clay");
@@ -91,7 +91,7 @@ namespace CCL_Clay3DP.UI
             _gatedControls.Add(analyzeButton);
             _gatedControls.Add(sendButton);
             _gatedControls.Add(runAllButton);
-            _gatedControls.Add(pipesButton);
+            _gatedControls.Add(previewClayModelButton);
             foreach (var c in _gatedControls) c.Enabled = false;
 
             // Status
@@ -112,7 +112,7 @@ namespace CCL_Clay3DP.UI
                     new TableRow(new Divider()),
                     new TableRow(runAllButton),
                     new TableRow(new Divider()),
-                    new TableRow(pipesButton),
+                    new TableRow(previewClayModelButton),
                     new TableRow(new Divider()),
                     new TableRow(_statusLabel),
                     new TableRow(_detailLabel),
@@ -136,7 +136,7 @@ namespace CCL_Clay3DP.UI
             "3DP::Inner Toolpath",
             "3DP::Bracing Toolpath",
             "3DP::Bracing Vectors",
-            "3DP::Toolpath Pipes",
+            "3DP::Clay Model",
         };
 
         private void OnSettingsClick(object sender, EventArgs e)
@@ -494,6 +494,69 @@ namespace CCL_Clay3DP.UI
             doc.Views.Redraw();
         }
 
+        /// <summary>
+        /// Create (or update) a PBR Rhino render material that matches the
+        /// active clay preset, then assign it to the given layer. The material
+        /// is named "CCL Clay - {PresetName}" so it's idempotent across runs:
+        /// repeated calls update the existing material in place rather than
+        /// piling up duplicates in the document Materials table.
+        ///
+        /// Sets both legacy (DiffuseColor) and PBR (BaseColor / Roughness /
+        /// Subsurface) properties so the layer reads correctly in any of
+        /// Rhino 8's display modes — Wireframe, Shaded, and Rendered.
+        /// </summary>
+        private static void EnsureClayRenderMaterial(
+            RhinoDoc doc, int layerIndex, string presetName,
+            ClayPreviewMaterials.ClayPbr pbr)
+        {
+            if (doc == null || pbr == null) return;
+            if (layerIndex < 0 || layerIndex >= doc.Layers.Count) return;
+
+            string matName = $"CCL Clay - {presetName ?? "Stoneware"}";
+
+            // Find existing material by name (case-sensitive, exact match) or
+            // create a new one. Material.Find returns -1 if not found.
+            int matIdx = doc.Materials.Find(matName, true);
+            Rhino.DocObjects.Material mat;
+            if (matIdx < 0)
+            {
+                mat = new Rhino.DocObjects.Material { Name = matName };
+                matIdx = doc.Materials.Add(mat);
+                mat = doc.Materials[matIdx];
+            }
+            else
+            {
+                mat = doc.Materials[matIdx];
+            }
+
+            // Legacy / non-PBR fallback values — used by Shaded display and
+            // any renderer that doesn't honor the PBR aspect.
+            mat.DiffuseColor = pbr.BaseColor;
+            mat.SpecularColor = System.Drawing.Color.FromArgb(40, 40, 40);
+            mat.Shine = 0.05 * Rhino.DocObjects.Material.MaxShine; // very matte
+
+            // PBR aspect — ensure the material is in PBR mode then write the
+            // physically-based fields. Read in Rendered viewport.
+            mat.ToPhysicallyBased();
+            var pbrMat = mat.PhysicallyBased;
+            if (pbrMat != null)
+            {
+                pbrMat.BaseColor = new Rhino.Display.Color4f(pbr.BaseColor);
+                pbrMat.Roughness = pbr.Roughness;
+                pbrMat.Metallic = 0.0;
+                pbrMat.Subsurface = pbr.Subsurface;
+                pbrMat.SubsurfaceScatteringColor =
+                    new Rhino.Display.Color4f(pbr.SubsurfaceColor);
+            }
+            mat.CommitChanges();
+
+            // Assign to layer's render material slot. Layer changes are
+            // immediate in Rhino 8 — no CommitChanges call required.
+            var layer = doc.Layers[layerIndex];
+            if (layer != null && !layer.IsDeleted)
+                layer.RenderMaterialIndex = matIdx;
+        }
+
         private static int EnsureLayer(RhinoDoc doc, string name, System.Drawing.Color color)
         {
             // Support nested layers with "::" separator
@@ -839,7 +902,7 @@ namespace CCL_Clay3DP.UI
 
         /// <summary>
         /// Bake outer contours only (Layer Slice without bracing). Uses the
-        /// Outer Toolpath layer so Pipes can pick them up uniformly.
+        /// Outer Toolpath layer so Preview Clay Model can pick them up uniformly.
         /// </summary>
         private void BakeLayerContours(List<Curve> contours)
         {
@@ -1026,7 +1089,7 @@ namespace CCL_Clay3DP.UI
             doc.Views.Redraw();
         }
 
-        private void OnPipesClick(object sender, EventArgs e)
+        private void OnPreviewClayModelClick(object sender, EventArgs e)
         {
             try
             {
@@ -1044,8 +1107,8 @@ namespace CCL_Clay3DP.UI
 
                 // Source layers: covers every mode that produces a toolpath
                 // curve. Spiral mode emits one curve on Spiral Toolpath;
-                // Layer / Layer+Bracing modes emit up to three. Pipes grabs
-                // whichever exist.
+                // Layer / Layer+Bracing modes emit up to three. The clay
+                // preview pipes whichever exist.
                 var sourceLayerNames = new[]
                 {
                     "3DP::Spiral Toolpath",
@@ -1075,38 +1138,43 @@ namespace CCL_Clay3DP.UI
 
                 if (curves.Count == 0)
                 {
-                    SetStatus("No curves on zigzag layers");
+                    SetStatus("No toolpath curves to preview — run Slice first");
                     return;
                 }
 
-                // Warn before starting — piping can take a while on dense stacks
-                // and users were getting spooked by the hang.
+                // Warn before starting — generation can take a while on dense
+                // stacks and users were getting spooked by the hang.
                 var confirm = MessageBox.Show(
                     this,
-                    $"About to pipe {curves.Count} curves at {diameter:F2} mm " +
-                    "bead diameter.\n\nThis can take a few moments on dense " +
-                    "geometry. Continue?",
-                    "CCL_Clay3DP — Generate pipes",
+                    $"About to build the clay model preview from {curves.Count} " +
+                    $"toolpath curves at {diameter:F2} mm bead diameter.\n\n" +
+                    "This can take a few moments on dense geometry. Continue?",
+                    "CCL_Clay3DP — Preview Clay Model",
                     MessageBoxButtons.YesNo,
                     MessageBoxType.Information,
                     MessageBoxDefaultButton.Yes);
                 if (confirm != DialogResult.Yes)
                 {
-                    SetStatus("Pipes cancelled");
+                    SetStatus("Preview cancelled");
                     return;
                 }
 
-                int pipesLayer = EnsureLayer(doc, "3DP::Toolpath Pipes",
-                    System.Drawing.Color.FromArgb(220, 180, 80));
+                // Layer color and render material both follow the active clay
+                // preset (Porcelain / Stoneware / Earthenware) so the preview
+                // reads as actual material in Wireframe, Shaded, and Rendered
+                // display modes alike.
+                var clayPbr = ClayPreviewMaterials.Get(_settings.Clay.PresetName);
+                int clayLayer = EnsureLayer(doc, "3DP::Clay Model", clayPbr.BaseColor);
+                EnsureClayRenderMaterial(doc, clayLayer, _settings.Clay.PresetName, clayPbr);
 
                 var attrs = new ObjectAttributes
                 {
-                    LayerIndex = pipesLayer,
-                    Name = "ToolpathPipe",
+                    LayerIndex = clayLayer,
+                    Name = "ClayModelMesh",
                 };
 
                 Rhino.UI.StatusBar.ShowProgressMeter(
-                    0, curves.Count, "CCL_Clay3DP: piping", true, true);
+                    0, curves.Count, "CCL_Clay3DP: building clay preview", true, true);
                 var lastUpdate = DateTime.Now;
 
                 int pipedOk = 0, failed = 0;
@@ -1143,22 +1211,22 @@ namespace CCL_Clay3DP.UI
                         }
                     }
 
-                    Mesh pipe = null;
+                    Mesh tube = null;
                     try
                     {
-                        pipe = Mesh.CreateFromCurvePipe(
+                        tube = Mesh.CreateFromCurvePipe(
                             pipeInput, radius, 12, 1,
                             MeshPipeCapStyle.Flat, false);
                     }
-                    catch (Exception pipeEx)
+                    catch (Exception tubeEx)
                     {
                         RhinoApp.WriteLine(
-                            $"[CCL_Clay3DP] Pipe failed on curve: {pipeEx.Message}");
+                            $"[CCL_Clay3DP] Bead tube failed on curve: {tubeEx.Message}");
                     }
 
-                    if (pipe != null && pipe.IsValid)
+                    if (tube != null && tube.IsValid)
                     {
-                        doc.Objects.AddMesh(pipe, attrs);
+                        doc.Objects.AddMesh(tube, attrs);
                         pipedOk++;
                     }
                     else
@@ -1196,7 +1264,7 @@ namespace CCL_Clay3DP.UI
                     {
                         lastUpdate = now;
                         Rhino.UI.StatusBar.SetMessagePane(
-                            $"CCL_Clay3DP: piping {i + 1}/{curves.Count}");
+                            $"CCL_Clay3DP: clay preview {i + 1}/{curves.Count}");
                         RhinoApp.Wait();
                     }
                 }
@@ -1204,14 +1272,14 @@ namespace CCL_Clay3DP.UI
 
                 doc.Views.Redraw();
                 SetStatus(
-                    $"Pipes: {pipedOk}/{curves.Count} meshes" +
+                    $"Clay model preview: {pipedOk}/{curves.Count} meshes" +
                     (failed > 0 ? $" ({failed} failed)" : ""));
             }
             catch (Exception ex)
             {
                 Rhino.UI.StatusBar.HideProgressMeter();
-                SetStatus($"Pipes error: {ex.Message}");
-                RhinoApp.WriteLine($"[CCL_Clay3DP] Pipes failed: {ex}");
+                SetStatus($"Preview error: {ex.Message}");
+                RhinoApp.WriteLine($"[CCL_Clay3DP] Preview Clay Model failed: {ex}");
             }
         }
 

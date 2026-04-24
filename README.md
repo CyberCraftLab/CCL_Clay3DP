@@ -59,7 +59,7 @@ configuration in RoboDK.
    with a red-yellow-green heatmap showing where clay printing is at risk
    (overhang angles, layer bond, robot wrist velocity). Works in every
    mode; three channels (Clay, Robot, Both) all render to the mesh.
-3. **Pipes visualization** — renders whichever toolpath curves exist
+3. **Preview Clay Model** — renders whichever toolpath curves exist
    (`Spiral Toolpath` / `Outer Toolpath` / `Inner Toolpath` /
    `Bracing Toolpath`) as mesh bead tubes at the configured Clay bead
    diameter, with mesh-sphere joints at every vertex for continuity.
@@ -69,7 +69,7 @@ configuration in RoboDK.
    regenerates the robot program using the CYARC KUKA post processor.
 
 **Workflow gating.** The Settings form is the first thing the user must
-interact with; all other workflow buttons (Slice, Analyze, Send, Pipes)
+interact with; all other workflow buttons (Slice, Analyze, Send, Preview Clay Model)
 stay disabled until Settings has been reviewed once in the session.
 Switching between Spiral and Layer modes automatically clears the other
 mode's generated layers on the next Slice, so the Rhino Layers panel
@@ -146,7 +146,7 @@ others on the next Slice.
 | `3DP::Bracing Vectors` | Inward-direction arrows (Layer + Bracing) | no (flip preview) |
 | `3DP::Bracing Outer Points` | Sample points on outer wall (Layer + Bracing) | no |
 | `3DP::Bracing Inner Points` | Sample points on inner wall (Layer + Bracing) | no |
-| `3DP::Toolpath Pipes` | Mesh-pipe visualization (any mode, Pipes button) | yes |
+| `3DP::Clay Model` | Mesh-bead visualization (any mode, Preview Clay Model button) | yes |
 | `3DP::Heatmap` | Vertex-colored input mesh (Analyze) | yes |
 
 In Layer + Bracing mode, picking **Yes** for the "flip inward direction"
