@@ -34,5 +34,18 @@ namespace CCL_Clay3DP.Core
         // a usable lowest contour).
         public List<Plane> SkirtFrames { get; set; } = new List<Plane>();
         public Curve SkirtCurve { get; set; }
+
+        // Base layers (Issue #10). When BaseSettings.EnableBase, the
+        // robot prints N base layers between the skirt and the part:
+        //   skirt (z=0) → [contour + infill] × N → part (shifted up by N·h)
+        // BaseFrames is the concatenated frame stream covering all base
+        // layers, in print order. BaseContourCurves and InfillCurves are
+        // bake-only visualizations (one entry per base layer). All base
+        // frames use +Z world normal — the base is always horizontal.
+        // Empty when base disabled or when the lowest contour was not
+        // recoverable.
+        public List<Plane> BaseFrames { get; set; } = new List<Plane>();
+        public List<Curve> BaseContourCurves { get; set; } = new List<Curve>();
+        public List<Curve> InfillCurves { get; set; } = new List<Curve>();
     }
 }

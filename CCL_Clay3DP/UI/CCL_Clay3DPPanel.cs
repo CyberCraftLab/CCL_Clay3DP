@@ -144,6 +144,8 @@ namespace CCL_Clay3DP.UI
             "3DP::Clay Model",
             "3DP::Print Position",
             "3DP::Skirt",
+            "3DP::Base Contour",
+            "3DP::Base Infill",
             "3DP::Build Volume",
         };
 
@@ -437,12 +439,21 @@ namespace CCL_Clay3DP.UI
 
                 Rhino.UI.StatusBar.ShowProgressMeter(0, 100, "CCL_Clay3DP", true, true);
 
+                // 1.5) Build base (Issue #10) before slicing the part — when
+                // the base is enabled, the part body needs to sit on top of
+                // it, so we shift the working geometry up by N · LayerHeight
+                // and slice the shifted copy. When disabled, working* refers
+                // to the original selection and the rest of the pipeline is
+                // unchanged.
+                var (workingBrep, workingMesh, baseResult, baseHeight) =
+                    PrepareBaseGeometry(selection);
+
                 // 2) Slice into contours
                 List<Curve> contours;
-                if (selection.Brep != null)
+                if (workingBrep != null)
                 {
                     contours = ContourSlicer.SliceBrep(
-                        selection.Brep,
+                        workingBrep,
                         _settings.Helix.LayerHeight,
                         _settings.Height.HeightOffsetBottom,
                         _settings.Height.HeightOffsetTop,
@@ -451,7 +462,7 @@ namespace CCL_Clay3DP.UI
                 else
                 {
                     contours = ContourSlicer.SliceMesh(
-                        selection.Mesh,
+                        workingMesh,
                         _settings.Helix.LayerHeight,
                         _settings.Height.HeightOffsetBottom,
                         _settings.Height.HeightOffsetTop,
@@ -477,8 +488,8 @@ namespace CCL_Clay3DP.UI
                 // used and it complicated the settings UI.
                 var frames = FrameComputer.ComputeFrames(
                     spiralPoints,
-                    selection.Brep,
-                    selection.Mesh,
+                    workingBrep,
+                    workingMesh,
                     normalOutward: true,
                     reportProgress);
 
@@ -507,14 +518,30 @@ namespace CCL_Clay3DP.UI
                 // 8) Bake to document
                 BakeResults(_lastResult);
 
-                // 9) Skirt — always produced from the lowest contour, 15 mm
-                // outward (Issue #8). First path the robot prints; primes
-                // the extruder before the part starts.
-                var skirt = SkirtBuilder.BuildSkirt(contours[0]);
-                BakeSkirt(RhinoDoc.ActiveDoc, skirt);
-                _lastResult.SkirtCurve = skirt;
-                _lastResult.SkirtFrames = SkirtBuilder.SampleSkirtFrames(
-                    skirt, _settings.Helix.FramesPerLayer);
+                // 9) Skirt and base. When the base is enabled, the skirt
+                // sits at z=0 around the BASE footprint (built earlier
+                // before the part was shifted up); the part's lowest
+                // contour at z=N·h gets no skirt. When disabled, the
+                // skirt is the part's own lowest contour offset, exactly
+                // as before (Issue #8).
+                if (baseResult != null)
+                {
+                    BakeSkirt(RhinoDoc.ActiveDoc, baseResult.SkirtCurve);
+                    BakeBaseLayers(RhinoDoc.ActiveDoc, baseResult);
+                    _lastResult.SkirtCurve = baseResult.SkirtCurve;
+                    _lastResult.SkirtFrames = baseResult.SkirtFrames;
+                    _lastResult.BaseFrames = baseResult.Frames;
+                    _lastResult.BaseContourCurves = baseResult.ContourCurves;
+                    _lastResult.InfillCurves = baseResult.InfillCurves;
+                }
+                else
+                {
+                    var skirt = SkirtBuilder.BuildSkirt(contours[0]);
+                    BakeSkirt(RhinoDoc.ActiveDoc, skirt);
+                    _lastResult.SkirtCurve = skirt;
+                    _lastResult.SkirtFrames = SkirtBuilder.SampleSkirtFrames(
+                        skirt, _settings.Helix.FramesPerLayer);
+                }
 
                 Rhino.UI.StatusBar.UpdateProgressMeter(100, true);
                 Rhino.UI.StatusBar.HideProgressMeter();
@@ -799,6 +826,118 @@ namespace CCL_Clay3DP.UI
             doc.Views.Redraw();
         }
 
+        /// <summary>
+        /// Bake the per-layer base contours and infill polylines onto
+        /// dedicated sublayers so the user can preview the base before
+        /// sending to RoboDK. One contour curve and (usually) one infill
+        /// polyline per base layer; nulls in InfillCurves are skipped
+        /// silently — they mean infill failed for that layer (e.g.,
+        /// scan returned no segments) but the contour still printed.
+        /// </summary>
+        private static void BakeBaseLayers(RhinoDoc doc, BaseResult baseResult)
+        {
+            if (doc == null || baseResult == null) return;
+
+            int contourLayer = EnsureLayer(
+                doc, "3DP::Base Contour", System.Drawing.Color.SteelBlue);
+            int infillLayer = EnsureLayer(
+                doc, "3DP::Base Infill", System.Drawing.Color.Teal);
+
+            if (contourLayer >= 0 && contourLayer < doc.Layers.Count)
+                doc.Layers[contourLayer].IsVisible = true;
+            if (infillLayer >= 0 && infillLayer < doc.Layers.Count)
+                doc.Layers[infillLayer].IsVisible = true;
+
+            for (int i = 0; i < baseResult.ContourCurves.Count; i++)
+            {
+                var c = baseResult.ContourCurves[i];
+                if (c == null || contourLayer < 0) continue;
+                doc.Objects.AddCurve(c, new ObjectAttributes
+                {
+                    LayerIndex = contourLayer,
+                    Name = $"Base Contour L{i}",
+                });
+            }
+            for (int i = 0; i < baseResult.InfillCurves.Count; i++)
+            {
+                var c = baseResult.InfillCurves[i];
+                if (c == null || infillLayer < 0) continue;
+                doc.Objects.AddCurve(c, new ObjectAttributes
+                {
+                    LayerIndex = infillLayer,
+                    Name = $"Base Infill L{i}",
+                });
+            }
+            doc.Views.Redraw();
+        }
+
+        /// <summary>
+        /// If base printing is enabled and a usable lowest contour can be
+        /// extracted from the part, build the base toolpath and return
+        /// translated working copies of the part geometry shifted up by
+        /// N · LayerHeight so existing slice / frame code can run against
+        /// them unchanged. When base is disabled (or the contour is
+        /// unrecoverable) returns the input geometry references and a
+        /// null base — caller treats that as the no-base path.
+        /// </summary>
+        private (Brep workingBrep, Mesh workingMesh, BaseResult baseResult, double baseHeight)
+            PrepareBaseGeometry(GeometrySelection selection)
+        {
+            if (selection == null || !_settings.Base.EnableBase)
+                return (selection?.Brep, selection?.Mesh, null, 0.0);
+
+            // Sample the part's actual lowest cross-section, before any
+            // shift. ContourSlicer's convention is bbox.Min.Z + 0.01 to
+            // skip the degenerate ground-plane tangent slice.
+            BoundingBox bbox = BoundingBox.Empty;
+            if (selection.Brep != null) bbox = selection.Brep.GetBoundingBox(true);
+            else if (selection.Mesh != null) bbox = selection.Mesh.GetBoundingBox(true);
+            if (!bbox.IsValid) return (selection.Brep, selection.Mesh, null, 0.0);
+
+            double zSlice = bbox.Min.Z + 0.01;
+            Curve lowestContour = selection.Brep != null
+                ? ContourSlicer.SliceBrepAt(selection.Brep, zSlice)
+                : ContourSlicer.SliceMeshAt(selection.Mesh, zSlice);
+
+            if (lowestContour == null || !lowestContour.IsClosed)
+            {
+                RhinoApp.WriteLine(
+                    "[CCL_Clay3DP] Base enabled but the part's lowest contour " +
+                    "is not closed/recoverable — skipping base for this slice.");
+                return (selection.Brep, selection.Mesh, null, 0.0);
+            }
+
+            var baseResult = BaseBuilder.Build(
+                lowestContour,
+                _settings.Base,
+                _settings.Helix.LayerHeight,
+                _settings.Clay.BeadDiameter,
+                _settings.Helix.FramesPerLayer);
+
+            if (baseResult.LayerCount == 0)
+                return (selection.Brep, selection.Mesh, null, 0.0);
+
+            double baseHeight = baseResult.TopZ;
+
+            // Translate working copies — never the originals — so other
+            // panel state (cached selection, re-slice, restore-on-cancel)
+            // sees the user's geometry untouched.
+            Brep workingBrep = null;
+            Mesh workingMesh = null;
+            if (selection.Brep != null)
+            {
+                workingBrep = selection.Brep.DuplicateBrep();
+                workingBrep.Translate(0.0, 0.0, baseHeight);
+            }
+            if (selection.Mesh != null)
+            {
+                workingMesh = selection.Mesh.DuplicateMesh();
+                workingMesh.Translate(0.0, 0.0, baseHeight);
+            }
+
+            return (workingBrep, workingMesh, baseResult, baseHeight);
+        }
+
         private static int EnsureLayer(RhinoDoc doc, string name, System.Drawing.Color color)
         {
             // Support nested layers with "::" separator
@@ -935,20 +1074,23 @@ namespace CCL_Clay3DP.UI
                 bool followNormal = _settings.Helix.SpiralSlice
                     && _settings.Helix.SpiralFollowsCurveNormal;
 
-                // Skirt prints first, then the part — concatenate skirt
-                // frames in front of the part frames into one continuous
-                // curve. With ApproachRetractAll=0 in the RoboDK template
-                // this gives: one approach to skirt's first point, trace
-                // the skirt, single linear move at op-speed to the part's
-                // first point (no Z lift, no extruder toggle), trace the
-                // part, one retract from the part's last point. Skirt
-                // frames have YAxis=+Z so they keep a +Z world normal
-                // even when followNormal=true for the part.
+                // Print order is skirt → base (if any) → part. Concatenate
+                // into one continuous frame stream so RoboDK traces it as a
+                // single curve: with ApproachRetractAll=0 in the template
+                // that gives one approach at the skirt's first point, then
+                // op-speed linear moves all the way to the part's last
+                // point (no Z lifts, no extruder toggles between blocks),
+                // then one retract. SkirtFrames and BaseFrames both carry
+                // YAxis=+Z so the build plate stays flat under them even
+                // when followCurveNormal is true for the part body.
                 var combinedFrames = new List<Rhino.Geometry.Plane>(
                     (_lastResult.SkirtFrames?.Count ?? 0)
+                    + (_lastResult.BaseFrames?.Count ?? 0)
                     + _lastResult.Frames.Count);
                 if (_lastResult.SkirtFrames != null)
                     combinedFrames.AddRange(_lastResult.SkirtFrames);
+                if (_lastResult.BaseFrames != null)
+                    combinedFrames.AddRange(_lastResult.BaseFrames);
                 combinedFrames.AddRange(_lastResult.Frames);
 
                 string jsonPath = RoboDK.FrameSerializer.SerializeToFile(
@@ -1037,15 +1179,20 @@ namespace CCL_Clay3DP.UI
                 double layerHeight = _settings.Helix.LayerHeight;
                 bool bracing = _settings.Helix.OuterWallBracing;
 
+                // Issue #10: build base before slicing so the part body
+                // sits on top of it (shifted up by N · LayerHeight).
+                var (workingBrep, workingMesh, baseResult, baseHeight) =
+                    PrepareBaseGeometry(selection);
+
                 SetStatus($"Layer slice: slicing at {layerHeight} mm...");
                 RhinoApp.Wait();
-                List<Curve> contours = selection.Brep != null
+                List<Curve> contours = workingBrep != null
                     ? ContourSlicer.SliceBrep(
-                        selection.Brep, layerHeight,
+                        workingBrep, layerHeight,
                         _settings.Height.HeightOffsetBottom,
                         _settings.Height.HeightOffsetTop)
                     : ContourSlicer.SliceMesh(
-                        selection.Mesh, layerHeight,
+                        workingMesh, layerHeight,
                         _settings.Height.HeightOffsetBottom,
                         _settings.Height.HeightOffsetTop);
 
@@ -1054,8 +1201,23 @@ namespace CCL_Clay3DP.UI
                     // Simple layer slice — just the outer contours.
                     BakeLayerContours(contours);
 
-                    // Skirt from the lowest contour (Issue #8).
-                    var skirtNoBrace = SkirtBuilder.BuildSkirt(contours[0]);
+                    // Skirt: when base is enabled, source from the base
+                    // footprint at z=0; otherwise from the part's lowest
+                    // contour (Issue #8).
+                    Curve skirtNoBrace;
+                    List<Plane> skirtNoBraceFrames;
+                    if (baseResult != null)
+                    {
+                        skirtNoBrace = baseResult.SkirtCurve;
+                        skirtNoBraceFrames = baseResult.SkirtFrames;
+                        BakeBaseLayers(RhinoDoc.ActiveDoc, baseResult);
+                    }
+                    else
+                    {
+                        skirtNoBrace = SkirtBuilder.BuildSkirt(contours[0]);
+                        skirtNoBraceFrames = SkirtBuilder.SampleSkirtFrames(
+                            skirtNoBrace, _settings.Helix.FramesPerLayer);
+                    }
                     BakeSkirt(RhinoDoc.ActiveDoc, skirtNoBrace);
 
                     // Cache for Analyze: sample outer contours + build +Z-up
@@ -1070,8 +1232,10 @@ namespace CCL_Clay3DP.UI
                         Contours = contours,
                         LayerCount = contours.Count,
                         SkirtCurve = skirtNoBrace,
-                        SkirtFrames = SkirtBuilder.SampleSkirtFrames(
-                            skirtNoBrace, _settings.Helix.FramesPerLayer),
+                        SkirtFrames = skirtNoBraceFrames,
+                        BaseFrames = baseResult?.Frames ?? new List<Plane>(),
+                        BaseContourCurves = baseResult?.ContourCurves ?? new List<Curve>(),
+                        InfillCurves = baseResult?.InfillCurves ?? new List<Curve>(),
                     };
 
                     SetStatus(WithTranslationNote(
@@ -1177,14 +1341,29 @@ namespace CCL_Clay3DP.UI
                     LayerCount = goodContours.Count,
                 };
 
-                // Skirt from the absolute lowest contour, NOT goodContours[0]
-                // — the skirt is independent of which layers passed the
-                // bracing filter (Issue #8).
-                var skirtBraced = SkirtBuilder.BuildSkirt(contours[0]);
-                BakeSkirt(RhinoDoc.ActiveDoc, skirtBraced);
-                _lastResult.SkirtCurve = skirtBraced;
-                _lastResult.SkirtFrames = SkirtBuilder.SampleSkirtFrames(
-                    skirtBraced, _settings.Helix.FramesPerLayer);
+                // Skirt: with base enabled, the skirt is the base's
+                // outward offset at z=0; otherwise the absolute lowest
+                // contour's offset (NOT goodContours[0] — the skirt is
+                // independent of which layers passed the bracing filter
+                // per Issue #8). Base layers also get baked for preview.
+                if (baseResult != null)
+                {
+                    BakeSkirt(RhinoDoc.ActiveDoc, baseResult.SkirtCurve);
+                    BakeBaseLayers(RhinoDoc.ActiveDoc, baseResult);
+                    _lastResult.SkirtCurve = baseResult.SkirtCurve;
+                    _lastResult.SkirtFrames = baseResult.SkirtFrames;
+                    _lastResult.BaseFrames = baseResult.Frames;
+                    _lastResult.BaseContourCurves = baseResult.ContourCurves;
+                    _lastResult.InfillCurves = baseResult.InfillCurves;
+                }
+                else
+                {
+                    var skirtBraced = SkirtBuilder.BuildSkirt(contours[0]);
+                    BakeSkirt(RhinoDoc.ActiveDoc, skirtBraced);
+                    _lastResult.SkirtCurve = skirtBraced;
+                    _lastResult.SkirtFrames = SkirtBuilder.SampleSkirtFrames(
+                        skirtBraced, _settings.Helix.FramesPerLayer);
+                }
 
                 SetStatus(WithTranslationNote(
                     $"Layer slice + bracing complete: {results.Count} layers" +
