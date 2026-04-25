@@ -21,5 +21,8 @@ namespace CCL_Clay3DP.Models
         public HelixParameters Helix { get; set; } = new HelixParameters();
         public RobotSettings Robot { get; set; } = new RobotSettings();
         public BuildVolumeSettings BuildVolume { get; set; } = new BuildVolumeSettings();
+        // Issue #10 — opt-in multi-layer base (skirt + contour + infill)
+        // for closed-loop / vase-style parts. Slice 1: settings only.
+        public BaseSettings Base { get; set; } = new BaseSettings();
     }
 }

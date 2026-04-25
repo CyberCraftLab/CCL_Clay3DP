@@ -31,6 +31,14 @@ namespace CCL_Clay3DP.Settings
         private NumericStepper _minBondRatio;
         private NumericStepper _materialDensity;
 
+        // Base fields (Issue #10) — multi-layer skirt + contour + 45-deg
+        // cross-hatch infill raft for closed-loop / vase-style parts. The
+        // dialog only exposes the on/off toggle and layer count; pattern
+        // and line spacing are hardcoded (see BaseSettings doc). Settings
+        // only in this commit; pipeline wired in follow-up slices.
+        private CheckBox _enableBaseCheck;
+        private NumericStepper _baseLayerCount;
+
         // Toolpath fields
         private CheckBox _spiralSliceCheck;
         private CheckBox _outerWallBracingCheck;
@@ -106,6 +114,32 @@ namespace CCL_Clay3DP.Settings
                         LabeledRow("Max overhang angle (deg)", _maxOverhang),
                         LabeledRow("Min layer bond ratio", _minBondRatio),
                         LabeledRow("Material density (g/cm3)", _materialDensity),
+                    },
+                },
+            };
+
+            // --- Base (Issue #10) ---
+            // Sits between Clay and Toolpath because the base is a
+            // material-driven feature (line spacing follows bead diameter)
+            // and conceptually precedes the part toolpath. Infill pattern
+            // and line spacing are hardcoded — see BaseSettings.
+            _enableBaseCheck = new CheckBox { Text = "Enable base (multi-layer raft)" };
+            _enableBaseCheck.CheckedChanged += (s, e) => UpdateBaseFieldsEnabled();
+
+            // 2..10 layers per spec; integer (DecimalPlaces=0).
+            _baseLayerCount = CreateStepper(2, 10, 1, 0);
+
+            var baseGroup = new GroupBox
+            {
+                Text = "Base",
+                Content = new TableLayout
+                {
+                    Spacing = new Size(8, 4),
+                    Padding = new Padding(8),
+                    Rows =
+                    {
+                        new TableRow(null, _enableBaseCheck),
+                        LabeledRow("Base layer count (2-10)", _baseLayerCount),
                     },
                 },
             };
@@ -264,6 +298,7 @@ namespace CCL_Clay3DP.Settings
                     Rows =
                     {
                         new TableRow(clayGroup),
+                        new TableRow(baseGroup),
                         new TableRow(spiralGroup),
                         new TableRow(robotGroup),
                         new TableRow(buildVolumeGroup),
@@ -303,6 +338,17 @@ namespace CCL_Clay3DP.Settings
             _minBondRatio.Value = _settings.Clay.MinLayerBondRatio;
             _materialDensity.Value = _settings.Clay.MaterialDensity;
 
+            // Base
+            _enableBaseCheck.Checked = _settings.Base.EnableBase;
+            // Clamp imported value into the stepper's range so out-of-spec
+            // settings.json files don't blow up the dialog with a min/max
+            // exception. Slice 2 will clamp again when the runtime consumes
+            // the value.
+            int clampedLayerCount = _settings.Base.LayerCount;
+            if (clampedLayerCount < 2) clampedLayerCount = 2;
+            if (clampedLayerCount > 10) clampedLayerCount = 10;
+            _baseLayerCount.Value = clampedLayerCount;
+
             // Toolpath
             _spiralSliceCheck.Checked = _settings.Helix.SpiralSlice;
             _outerWallBracingCheck.Checked = _settings.Helix.OuterWallBracing;
@@ -339,6 +385,7 @@ namespace CCL_Clay3DP.Settings
 
             UpdateTiltFieldsEnabled();
             UpdateToolpathFieldsEnabled();
+            UpdateBaseFieldsEnabled();
         }
 
         private void SaveValues()
@@ -358,6 +405,10 @@ namespace CCL_Clay3DP.Settings
             _settings.Clay.MaxOverhangAngle = _maxOverhang.Value;
             _settings.Clay.MinLayerBondRatio = _minBondRatio.Value;
             _settings.Clay.MaterialDensity = _materialDensity.Value;
+
+            // Base
+            _settings.Base.EnableBase = _enableBaseCheck.Checked ?? false;
+            _settings.Base.LayerCount = (int)_baseLayerCount.Value;
 
             // Toolpath
             _settings.Helix.SpiralSlice = _spiralSliceCheck.Checked ?? true;
@@ -412,6 +463,16 @@ namespace CCL_Clay3DP.Settings
             var mode = (TiltMode)_tiltModeDropDown.SelectedIndex;
             _leadAngle.Enabled = mode == TiltMode.LeadLag;
             _verticalBias.Enabled = mode == TiltMode.VerticalBias;
+        }
+
+        /// <summary>
+        /// Gray out base parameters when the feature is disabled. Mirrors
+        /// the pattern used for tilt-mode fields and toolpath-mode fields.
+        /// </summary>
+        private void UpdateBaseFieldsEnabled()
+        {
+            bool on = _enableBaseCheck.Checked ?? false;
+            _baseLayerCount.Enabled = on;
         }
 
         /// <summary>
@@ -622,6 +683,11 @@ namespace CCL_Clay3DP.Settings
             _settings.Robot = loaded.Robot;
             if (loaded.BuildVolume != null)
                 _settings.BuildVolume = loaded.BuildVolume;
+            // Pre-#10 settings files won't carry a Base block; keep
+            // whatever defaults the dialog already had so the user isn't
+            // dropped into a half-configured state.
+            if (loaded.Base != null)
+                _settings.Base = loaded.Base;
             LoadValues();
         }
     }
