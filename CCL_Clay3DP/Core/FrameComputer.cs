@@ -70,39 +70,6 @@ namespace CCL_Clay3DP.Core
             return frames;
         }
 
-        /// <summary>
-        /// Generate a ribbon as a lightweight mesh along the frames.
-        /// Much faster than Brep loft for large frame counts.
-        /// </summary>
-        public static Mesh GenerateRibbonMesh(List<Plane> frames, double ribbonWidth)
-        {
-            if (frames.Count < 2)
-                return null;
-
-            double half = ribbonWidth * 0.5;
-            var mesh = new Mesh();
-
-            for (int i = 0; i < frames.Count; i++)
-            {
-                var frame = frames[i];
-                Point3d left = frame.Origin - frame.ZAxis * half;
-                Point3d right = frame.Origin + frame.ZAxis * half;
-
-                mesh.Vertices.Add(left);
-                mesh.Vertices.Add(right);
-
-                if (i > 0)
-                {
-                    int v = mesh.Vertices.Count;
-                    mesh.Faces.AddFace(v - 4, v - 3, v - 1, v - 2);
-                }
-            }
-
-            mesh.Normals.ComputeNormals();
-            mesh.Compact();
-            return mesh;
-        }
-
         private static Vector3d GetSurfaceNormal(Point3d pt, Brep brep, Mesh mesh)
         {
             // Try Brep first

@@ -39,6 +39,12 @@ namespace CCL_Clay3DP.UI
         private SpiralResult _lastResult;
         private GeometrySelection _lastGeometry;
 
+        // Stash the "translated X mm to origin" note so the completion
+        // status can append it after RunSliceAndBake / RunLayerSlice
+        // overwrite the panel's status with their own progress messages.
+        private string _lastTranslationNote;
+
+
         // Workflow controls disabled until the user reviews Settings at least
         // once in this session. Avoids users clicking Slice with stale or
         // unconfigured params.
@@ -61,8 +67,8 @@ namespace CCL_Clay3DP.UI
             var sliceButton = new Button { Text = "1. Slice" };
             sliceButton.Click += OnSliceClick;
 
-            var pipesButton = new Button { Text = "Pipes" };
-            pipesButton.Click += OnPipesClick;
+            var previewClayModelButton = new Button { Text = "Preview Clay Model" };
+            previewClayModelButton.Click += OnPreviewClayModelClick;
 
             _analysisChannel = new DropDown();
             _analysisChannel.Items.Add("Clay");
@@ -91,7 +97,7 @@ namespace CCL_Clay3DP.UI
             _gatedControls.Add(analyzeButton);
             _gatedControls.Add(sendButton);
             _gatedControls.Add(runAllButton);
-            _gatedControls.Add(pipesButton);
+            _gatedControls.Add(previewClayModelButton);
             foreach (var c in _gatedControls) c.Enabled = false;
 
             // Status
@@ -112,7 +118,7 @@ namespace CCL_Clay3DP.UI
                     new TableRow(new Divider()),
                     new TableRow(runAllButton),
                     new TableRow(new Divider()),
-                    new TableRow(pipesButton),
+                    new TableRow(previewClayModelButton),
                     new TableRow(new Divider()),
                     new TableRow(_statusLabel),
                     new TableRow(_detailLabel),
@@ -128,7 +134,6 @@ namespace CCL_Clay3DP.UI
         {
             "3DP::Contours",
             "3DP::Spiral Toolpath",
-            "3DP::Ribbon",
             "3DP::Heatmap",
             "3DP::Outer Toolpath",
             "3DP::Bracing Outer Points",
@@ -136,7 +141,10 @@ namespace CCL_Clay3DP.UI
             "3DP::Inner Toolpath",
             "3DP::Bracing Toolpath",
             "3DP::Bracing Vectors",
-            "3DP::Toolpath Pipes",
+            "3DP::Clay Model",
+            "3DP::Print Position",
+            "3DP::Skirt",
+            "3DP::Build Volume",
         };
 
         private void OnSettingsClick(object sender, EventArgs e)
@@ -175,29 +183,36 @@ namespace CCL_Clay3DP.UI
             {
                 // Auto-rebuild only makes sense for Spiral Slice — the Layer
                 // Slice flow can be interactive (flip + distance prompts when
-                // Inner Wall Bracing is on), so we leave it for the user to
+                // Outer Wall Bracing is on), so we leave it for the user to
                 // kick off with the Slice button.
                 SetStatus("Settings changed — regenerating spiral...");
                 RhinoApp.Wait();
                 RunSliceAndBake(geometryToRebuild);
-
-                // If the user has already pushed this job to RoboDK in this
-                // session, keep RoboDK in sync with the new settings without
-                // making them click Send again. Skip the confirm dialog
-                // because the user just explicitly asked for this change by
-                // saving settings.
-                if (_hasSentToRoboDK && _lastResult != null
-                    && _lastResult.Frames.Count > 0)
-                {
-                    SetStatus("Settings changed — updating RoboDK template...");
-                    RhinoApp.Wait();
-                    PerformSendToRoboDK();
-                }
             }
             else
             {
                 SetStatus("Generated layers cleared — click Slice to regenerate");
             }
+
+            // Re-bake the visual markers regardless of whether we did an
+            // auto-slice. ClearGeneratedContent above wiped them along
+            // with the slice content; without these calls they would
+            // stay gone until the next manual Slice click. Build Volume
+            // depends only on settings (so it's always safe to re-bake);
+            // Print Position depends on the last selected geometry, so
+            // it's only re-baked when we still have a reference to it.
+            BakeBuildVolume(doc, _settings.BuildVolume);
+            if (geometryToRebuild != null)
+                BakePrintPositionMarker(doc, geometryToRebuild);
+
+            // RoboDK is never re-launched / re-sent automatically — that
+            // is reserved for the explicit "Send to RoboDK" button (and
+            // "Run All" while it exists). If the user previously sent a
+            // job in this session, the RoboDK side is now stale; tell
+            // them so they don't accidentally simulate / run the old
+            // program.
+            if (_hasSentToRoboDK)
+                WarnRoboDKStaleAfterSettingsChange();
         }
 
         private bool HasGeneratedContent(RhinoDoc doc)
@@ -323,6 +338,28 @@ namespace CCL_Clay3DP.UI
                 return;
             }
 
+            // Outer Wall Bracing gate — bracing's per-layer DivideByCount
+            // + seam-align algorithm only behaves on ruled / extrudable
+            // geometry. On free-form (sphere, organic Brep) the seam
+            // wanders between layers and the bracing twists into junk.
+            // Reject before mutating anything (no clear, no translate).
+            if (!_settings.Helix.SpiralSlice
+                && _settings.Helix.OuterWallBracing
+                && !GeometryCurvature.IsRuled(selection))
+            {
+                MessageBox.Show(this,
+                    "Outer Wall Bracing requires ruled / extruded geometry "
+                    + "(cylinders, prisms, cones, planar extrusions). The "
+                    + "selected part is free-form (has curvature in more "
+                    + "than one parametric direction).\n\n"
+                    + "Disable Outer Wall Bracing in Settings, or pick a "
+                    + "ruled-surface part, then click Slice again.",
+                    "Outer Wall Bracing not permitted",
+                    MessageBoxButtons.OK, MessageBoxType.Warning);
+                SetStatus("Bracing not permitted on free-form geometry — slice cancelled.");
+                return;
+            }
+
             // Clean slate: remove any generated output from a previous run
             // (including output from the OTHER mode) so what's in Rhino
             // always reflects the current Settings choice.
@@ -333,10 +370,42 @@ namespace CCL_Clay3DP.UI
                 _lastResult = null;
             }
 
+            // Auto-translate the selection to world origin so the model,
+            // the toolpath, and the build-volume box all share the same
+            // frame of reference (commercial-slicer convention). The
+            // user's original Rhino object physically moves — this is
+            // intentional, matches PrusaSlicer / Cura / Bambu Studio
+            // behavior, and the move is undoable with Ctrl+Z. Subsequent
+            // slices on the same object are no-ops since the bbox
+            // bottom-center is already at origin.
+            double translationDistance;
+            var translation = ComputePrintingTranslation(
+                selection, out translationDistance);
+            if (doc != null && translationDistance >= 0.001
+                && selection.SourceObjectId != Guid.Empty)
+            {
+                doc.Objects.Transform(
+                    selection.SourceObjectId, translation, true);
+            }
+            // Match the in-memory Brep/Mesh copy to the doc state so the
+            // slicer operates on geometry at the origin.
+            var printingSelection = ApplyTransform(selection, translation);
+            if (doc != null)
+            {
+                BakePrintPositionMarker(doc, printingSelection);
+                BakeBuildVolume(doc, _settings.BuildVolume);
+            }
+            string translationMsg = translationDistance < 0.001
+                ? "Geometry already at origin"
+                : $"Geometry translated {translationDistance:F1} mm to " +
+                  "origin for printing";
+            _lastTranslationNote = translationMsg;
+            SetStatus(translationMsg);
+
             if (_settings.Helix.SpiralSlice)
-                RunSliceAndBake(selection);
+                RunSliceAndBake(printingSelection);
             else
-                RunLayerSlice(selection);
+                RunLayerSlice(printingSelection);
         }
 
         private void RunSliceAndBake(GeometrySelection selection)
@@ -402,27 +471,24 @@ namespace CCL_Clay3DP.UI
                 reportProgress(0.1);
                 SetStatus($"Computing {spiralPoints.Count} frames...");
 
-                // 4) Compute frames
+                // 4) Compute frames — outward surface normal is the only
+                // sensible default for clay printing (extruder approaches the
+                // surface from outside). Hard-coded since the option was never
+                // used and it complicated the settings UI.
                 var frames = FrameComputer.ComputeFrames(
                     spiralPoints,
                     selection.Brep,
                     selection.Mesh,
-                    _settings.Ribbon.NormalOutward,
+                    normalOutward: true,
                     reportProgress);
 
                 // 5) Create spiral curve
-                Rhino.UI.StatusBar.UpdateProgressMeter(80, true);
-                Rhino.UI.StatusBar.SetMessagePane("CCL_Clay3DP: 80% — Creating spiral curve...");
+                Rhino.UI.StatusBar.UpdateProgressMeter(85, true);
+                Rhino.UI.StatusBar.SetMessagePane("CCL_Clay3DP: 85% — Creating spiral curve...");
                 RhinoApp.Wait();
                 var spiralCurve = SpiralInterpolator.CreateSpiralCurve(spiralPoints);
 
-                // 6) Generate ribbon mesh
-                Rhino.UI.StatusBar.UpdateProgressMeter(90, true);
-                Rhino.UI.StatusBar.SetMessagePane("CCL_Clay3DP: 90% — Generating ribbon...");
-                RhinoApp.Wait();
-                var ribbon = FrameComputer.GenerateRibbonMesh(frames, _settings.Ribbon.RibbonWidth);
-
-                // 7) Prepare to bake
+                // 6) Prepare to bake
                 Rhino.UI.StatusBar.UpdateProgressMeter(95, true);
                 Rhino.UI.StatusBar.SetMessagePane("CCL_Clay3DP: 95% — Baking to document...");
                 RhinoApp.Wait();
@@ -434,7 +500,6 @@ namespace CCL_Clay3DP.UI
                     ToolpathPoints = spiralPoints,
                     Frames = frames,
                     SpiralCurve = spiralCurve,
-                    RibbonMesh = ribbon,
                     Contours = contours,
                     LayerCount = contours.Count,
                 };
@@ -442,9 +507,18 @@ namespace CCL_Clay3DP.UI
                 // 8) Bake to document
                 BakeResults(_lastResult);
 
+                // 9) Skirt — always produced from the lowest contour, 15 mm
+                // outward (Issue #8). First path the robot prints; primes
+                // the extruder before the part starts.
+                var skirt = SkirtBuilder.BuildSkirt(contours[0]);
+                BakeSkirt(RhinoDoc.ActiveDoc, skirt);
+                _lastResult.SkirtCurve = skirt;
+                _lastResult.SkirtFrames = SkirtBuilder.SampleSkirtFrames(
+                    skirt, _settings.Helix.FramesPerLayer);
+
                 Rhino.UI.StatusBar.UpdateProgressMeter(100, true);
                 Rhino.UI.StatusBar.HideProgressMeter();
-                SetStatus("Spiral slice complete");
+                SetStatus(WithTranslationNote("Spiral slice complete"));
                 SetDetail(frames.Count, 0);
             }
             catch (Exception ex)
@@ -462,11 +536,11 @@ namespace CCL_Clay3DP.UI
 
             // Contours are intermediate data used to compute the spiral; we
             // no longer bake them — the user doesn't need them in the layer
-            // panel. The SpiralCurve is the actual toolpath output.
+            // panel. The SpiralCurve is the actual toolpath output. The
+            // ribbon mesh viz was retired too — frames are still computed
+            // and sent to RoboDK, just not baked as a visual aid.
             int spiralLayer = EnsureLayer(doc, "3DP::Spiral Toolpath",
                 System.Drawing.Color.FromArgb(255, 0, 0));
-            int ribbonLayer = EnsureLayer(doc, "3DP::Ribbon",
-                System.Drawing.Color.FromArgb(255, 255, 255));
 
             var attrs = new ObjectAttributes();
 
@@ -478,19 +552,250 @@ namespace CCL_Clay3DP.UI
                 doc.Objects.AddCurve(result.SpiralCurve, attrs);
             }
 
-            // Bake ribbon
-            if (result.RibbonMesh != null && result.RibbonMesh.IsValid)
+            doc.Views.Redraw();
+        }
+
+        /// <summary>
+        /// Create (or update) a PBR Rhino render material that matches the
+        /// active clay preset, then assign it to the given layer. The material
+        /// is named "CCL Clay - {PresetName}" so it's idempotent across runs:
+        /// repeated calls update the existing material in place rather than
+        /// piling up duplicates in the document Materials table.
+        ///
+        /// Sets both legacy (DiffuseColor) and PBR (BaseColor / Roughness /
+        /// Subsurface) properties so the layer reads correctly in any of
+        /// Rhino 8's display modes — Wireframe, Shaded, and Rendered.
+        /// </summary>
+        private static void EnsureClayRenderMaterial(
+            RhinoDoc doc, int layerIndex, string presetName,
+            ClayPreviewMaterials.ClayPbr pbr)
+        {
+            if (doc == null || pbr == null) return;
+            if (layerIndex < 0 || layerIndex >= doc.Layers.Count) return;
+
+            string matName = $"CCL Clay - {presetName ?? "Stoneware"}";
+
+            // Find existing material by name (case-sensitive, exact match) or
+            // create a new one. Material.Find returns -1 if not found.
+            int matIdx = doc.Materials.Find(matName, true);
+            Rhino.DocObjects.Material mat;
+            if (matIdx < 0)
             {
-                attrs.LayerIndex = ribbonLayer;
-                attrs.Name = "Ribbon";
-                doc.Objects.AddMesh(result.RibbonMesh, attrs);
+                mat = new Rhino.DocObjects.Material { Name = matName };
+                matIdx = doc.Materials.Add(mat);
+                mat = doc.Materials[matIdx];
+            }
+            else
+            {
+                mat = doc.Materials[matIdx];
             }
 
-            // Ribbon layer is off by default — it's a debug visual that the
-            // user can toggle on if they want to inspect tool orientation.
-            if (ribbonLayer >= 0 && ribbonLayer < doc.Layers.Count)
-                doc.Layers[ribbonLayer].IsVisible = false;
+            // Legacy / non-PBR fallback values — used by Shaded display and
+            // any renderer that doesn't honor the PBR aspect.
+            mat.DiffuseColor = pbr.BaseColor;
+            mat.SpecularColor = System.Drawing.Color.FromArgb(40, 40, 40);
+            mat.Shine = 0.05 * Rhino.DocObjects.Material.MaxShine; // very matte
 
+            // PBR aspect — ensure the material is in PBR mode then write the
+            // physically-based fields. Read in Rendered viewport.
+            mat.ToPhysicallyBased();
+            var pbrMat = mat.PhysicallyBased;
+            if (pbrMat != null)
+            {
+                pbrMat.BaseColor = new Rhino.Display.Color4f(pbr.BaseColor);
+                pbrMat.Roughness = pbr.Roughness;
+                pbrMat.Metallic = 0.0;
+                pbrMat.Subsurface = pbr.Subsurface;
+                pbrMat.SubsurfaceScatteringColor =
+                    new Rhino.Display.Color4f(pbr.SubsurfaceColor);
+            }
+            mat.CommitChanges();
+
+            // Assign to layer's render material slot. Layer changes are
+            // immediate in Rhino 8 — no CommitChanges call required.
+            var layer = doc.Layers[layerIndex];
+            if (layer != null && !layer.IsDeleted)
+                layer.RenderMaterialIndex = matIdx;
+        }
+
+        // Translation that lands the input bbox bottom-center at world
+        // origin (XY centroid → 0,0; lowest Z → 0). Identity if bbox is
+        // invalid or empty. `distance` is the magnitude of the translation,
+        // used by the caller for status messages.
+        private static Transform ComputePrintingTranslation(
+            GeometrySelection sel, out double distance)
+        {
+            distance = 0.0;
+            if (sel == null) return Transform.Identity;
+            BoundingBox bbox = BoundingBox.Empty;
+            if (sel.Brep != null) bbox = sel.Brep.GetBoundingBox(true);
+            else if (sel.Mesh != null) bbox = sel.Mesh.GetBoundingBox(true);
+            if (!bbox.IsValid) return Transform.Identity;
+
+            var center = bbox.Center;
+            double dx = -center.X;
+            double dy = -center.Y;
+            double dz = -bbox.Min.Z;
+            distance = Math.Sqrt(dx * dx + dy * dy + dz * dz);
+            return Transform.Translation(new Vector3d(dx, dy, dz));
+        }
+
+        // Returns a translated copy of the selection. Originals are not
+        // modified — a Brep is duplicated and a Mesh is duplicated before
+        // Transform is applied. Identity transforms are returned as-is.
+        private static GeometrySelection ApplyTransform(
+            GeometrySelection sel, Transform xform)
+        {
+            if (sel == null) return null;
+            if (xform == Transform.Identity) return sel;
+            // Propagate the SourceObjectId to the transformed copy so the
+            // panel can still hide / restore the user's original geometry
+            // even though the slice pipeline operates on the translated
+            // duplicate.
+            var result = new GeometrySelection
+            {
+                SourceObjectId = sel.SourceObjectId,
+            };
+            if (sel.Brep != null)
+            {
+                var b = sel.Brep.DuplicateBrep();
+                b.Transform(xform);
+                result.Brep = b;
+            }
+            if (sel.Mesh != null)
+            {
+                var m = sel.Mesh.DuplicateMesh();
+                m.Transform(xform);
+                result.Mesh = m;
+            }
+            return result;
+        }
+
+        // Bake a small RGB axis cross at the world origin so the user
+        // can see where the print will physically land. Single dedicated
+        // layer "3DP::Print Position", visible by default. The earlier
+        // bounding-box wireframe was removed (too much visual clutter for
+        // not enough information).
+        private static void BakePrintPositionMarker(
+            RhinoDoc doc, GeometrySelection sel)
+        {
+            if (doc == null || sel == null) return;
+            BoundingBox bbox = BoundingBox.Empty;
+            if (sel.Brep != null) bbox = sel.Brep.GetBoundingBox(true);
+            else if (sel.Mesh != null) bbox = sel.Mesh.GetBoundingBox(true);
+            if (!bbox.IsValid) return;
+
+            int layerIdx = EnsureLayer(
+                doc, "3DP::Print Position", System.Drawing.Color.DimGray);
+            if (layerIdx < 0) return;
+            if (layerIdx < doc.Layers.Count)
+                doc.Layers[layerIdx].IsVisible = true;
+
+            // RGB axis cross. Length scales with the part bbox so it
+            // stays visible on both small and large prints, with a 20mm
+            // floor.
+            double diag = bbox.Diagonal.Length;
+            double axisLen = Math.Max(20.0, diag * 0.1);
+            var origin = Point3d.Origin;
+            var axes = new[]
+            {
+                new { Dir = new Vector3d(axisLen, 0, 0),
+                      Name = "PrintPositionAxisX",
+                      Color = System.Drawing.Color.Red },
+                new { Dir = new Vector3d(0, axisLen, 0),
+                      Name = "PrintPositionAxisY",
+                      Color = System.Drawing.Color.Green },
+                new { Dir = new Vector3d(0, 0, axisLen),
+                      Name = "PrintPositionAxisZ",
+                      Color = System.Drawing.Color.Blue },
+            };
+            foreach (var ax in axes)
+            {
+                var attrs = new ObjectAttributes
+                {
+                    LayerIndex = layerIdx,
+                    Name = ax.Name,
+                    ObjectDecoration = ObjectDecoration.EndArrowhead,
+                    ColorSource = ObjectColorSource.ColorFromObject,
+                    ObjectColor = ax.Color,
+                };
+                var line = new LineCurve(origin, origin + ax.Dir);
+                if (line.IsValid) doc.Objects.AddCurve(line, attrs);
+            }
+
+            doc.Views.Redraw();
+        }
+
+        // Bake a wireframe box showing the cell's printable space:
+        // 12 edges from (XMin, YMin, 0) to (XMax, YMax, Height). The
+        // box always sits on the build plate (Z starts at 0). Bounds
+        // come from PipelineSettings.BuildVolume so the user can adjust
+        // them in Settings if they have a different cell.
+        private static void BakeBuildVolume(
+            RhinoDoc doc, BuildVolumeSettings bv)
+        {
+            if (doc == null || bv == null) return;
+            // Validate ranges — silently skip on degenerate input rather
+            // than throw mid-slice.
+            if (bv.XMin >= bv.XMax) return;
+            if (bv.YMin >= bv.YMax) return;
+            if (bv.Height <= 0) return;
+
+            int layerIdx = EnsureLayer(
+                doc, "3DP::Build Volume", System.Drawing.Color.DarkCyan);
+            if (layerIdx < 0) return;
+            if (layerIdx < doc.Layers.Count)
+                doc.Layers[layerIdx].IsVisible = true;
+
+            var c = new Point3d[8]
+            {
+                new Point3d(bv.XMin, bv.YMin, 0.0),       // 0
+                new Point3d(bv.XMax, bv.YMin, 0.0),       // 1
+                new Point3d(bv.XMax, bv.YMax, 0.0),       // 2
+                new Point3d(bv.XMin, bv.YMax, 0.0),       // 3
+                new Point3d(bv.XMin, bv.YMin, bv.Height), // 4
+                new Point3d(bv.XMax, bv.YMin, bv.Height), // 5
+                new Point3d(bv.XMax, bv.YMax, bv.Height), // 6
+                new Point3d(bv.XMin, bv.YMax, bv.Height), // 7
+            };
+            int[,] edges = new int[,]
+            {
+                { 0, 1 }, { 1, 2 }, { 2, 3 }, { 3, 0 }, // bottom rect
+                { 4, 5 }, { 5, 6 }, { 6, 7 }, { 7, 4 }, // top rect
+                { 0, 4 }, { 1, 5 }, { 2, 6 }, { 3, 7 }, // verticals
+            };
+            var attrs = new ObjectAttributes
+            {
+                LayerIndex = layerIdx,
+                Name = "BuildVolumeEdge",
+            };
+            for (int i = 0; i < edges.GetLength(0); i++)
+            {
+                var line = new LineCurve(c[edges[i, 0]], c[edges[i, 1]]);
+                if (line.IsValid) doc.Objects.AddCurve(line, attrs);
+            }
+            doc.Views.Redraw();
+        }
+
+        // Bake the skirt curve on its own layer so the user can verify
+        // the offset before sending to the robot. The skirt is always
+        // produced from the lowest contour (15 mm outward, fixed) and
+        // is the first path the robot follows.
+        private static void BakeSkirt(RhinoDoc doc, Curve skirt)
+        {
+            if (doc == null || skirt == null) return;
+            int layerIdx = EnsureLayer(
+                doc, "3DP::Skirt", System.Drawing.Color.Blue);
+            if (layerIdx < 0) return;
+            if (layerIdx < doc.Layers.Count)
+                doc.Layers[layerIdx].IsVisible = true;
+
+            var attrs = new ObjectAttributes
+            {
+                LayerIndex = layerIdx,
+                Name = "Skirt",
+            };
+            doc.Objects.AddCurve(skirt, attrs);
             doc.Views.Redraw();
         }
 
@@ -623,8 +928,32 @@ namespace CCL_Clay3DP.UI
 
                 SetStatus($"Serializing {_lastResult.Frames.Count} frames...");
 
+                // Follow-curve-normal mode only applies to Spiral toolpaths;
+                // Layer-mode frames are world-Z by construction anyway, but
+                // we gate explicitly on SpiralSlice so the flag's intent is
+                // unambiguous at the call site.
+                bool followNormal = _settings.Helix.SpiralSlice
+                    && _settings.Helix.SpiralFollowsCurveNormal;
+
+                // Skirt prints first, then the part — concatenate skirt
+                // frames in front of the part frames into one continuous
+                // curve. With ApproachRetractAll=0 in the RoboDK template
+                // this gives: one approach to skirt's first point, trace
+                // the skirt, single linear move at op-speed to the part's
+                // first point (no Z lift, no extruder toggle), trace the
+                // part, one retract from the part's last point. Skirt
+                // frames have YAxis=+Z so they keep a +Z world normal
+                // even when followNormal=true for the part.
+                var combinedFrames = new List<Rhino.Geometry.Plane>(
+                    (_lastResult.SkirtFrames?.Count ?? 0)
+                    + _lastResult.Frames.Count);
+                if (_lastResult.SkirtFrames != null)
+                    combinedFrames.AddRange(_lastResult.SkirtFrames);
+                combinedFrames.AddRange(_lastResult.Frames);
+
                 string jsonPath = RoboDK.FrameSerializer.SerializeToFile(
-                    _lastResult.Frames, _settings.Robot, _settings.Helix.LayerHeight);
+                    combinedFrames, _settings.Robot,
+                    _settings.Helix.LayerHeight, followNormal);
 
                 SetStatus("Sending to RoboDK...");
                 RhinoApp.Wait();
@@ -680,12 +1009,33 @@ namespace CCL_Clay3DP.UI
             return result == DialogResult.Yes;
         }
 
+        /// <summary>
+        /// One-shot informational warning: settings changed and the Rhino
+        /// toolpath was cleared, but RoboDK still holds the toolpath from
+        /// the previous Send. The user must Slice + Send again to refresh
+        /// it. Fires only when auto-rebuild can't propagate (Layer mode, or
+        /// when the geometry reference was lost).
+        /// </summary>
+        private void WarnRoboDKStaleAfterSettingsChange()
+        {
+            MessageBox.Show(
+                this,
+                "Settings changed and the previous Rhino toolpath was cleared, " +
+                "but the RoboDK session still holds the toolpath from the " +
+                "previous Send.\n\n" +
+                "Click Slice and then Send to RoboDK to refresh it before " +
+                "running the next print.",
+                "CCL_Clay3DP — RoboDK out of sync",
+                MessageBoxButtons.OK,
+                MessageBoxType.Warning);
+        }
+
         private void RunLayerSlice(GeometrySelection selection)
         {
             try
             {
                 double layerHeight = _settings.Helix.LayerHeight;
-                bool bracing = _settings.Helix.InnerWallBracing;
+                bool bracing = _settings.Helix.OuterWallBracing;
 
                 SetStatus($"Layer slice: slicing at {layerHeight} mm...");
                 RhinoApp.Wait();
@@ -704,6 +1054,10 @@ namespace CCL_Clay3DP.UI
                     // Simple layer slice — just the outer contours.
                     BakeLayerContours(contours);
 
+                    // Skirt from the lowest contour (Issue #8).
+                    var skirtNoBrace = SkirtBuilder.BuildSkirt(contours[0]);
+                    BakeSkirt(RhinoDoc.ActiveDoc, skirtNoBrace);
+
                     // Cache for Analyze: sample outer contours + build +Z-up
                     // frames so Clay / Robot / Both all work in this mode.
                     var pts = new List<Point3d>();
@@ -715,13 +1069,17 @@ namespace CCL_Clay3DP.UI
                         Frames = ComputeLayerFrames(pts),
                         Contours = contours,
                         LayerCount = contours.Count,
+                        SkirtCurve = skirtNoBrace,
+                        SkirtFrames = SkirtBuilder.SampleSkirtFrames(
+                            skirtNoBrace, _settings.Helix.FramesPerLayer),
                     };
 
-                    SetStatus($"Layer slice complete: {contours.Count} contours");
+                    SetStatus(WithTranslationNote(
+                        $"Layer slice complete: {contours.Count} contours"));
                     return;
                 }
 
-                // Inner Wall Bracing: preview inward arrows so the user can
+                // Outer Wall Bracing: preview inward arrows so the user can
                 // flip the side before picking the offset distance.
                 int numPoints = _settings.Helix.FramesPerLayer;
                 const double previewArrowLength = 5.0;
@@ -796,23 +1154,16 @@ namespace CCL_Clay3DP.UI
                 BakeZigzagStack(goodContours, results, flipInward);
 
                 // Robot print order per layer (bottom to top):
-                //   Inner Toolpath → Outer Toolpath → Bracing Toolpath
-                // The flip swaps which underlying curve ends up on which
-                // named layer, so the print order follows suit.
+                //   Outer Toolpath → Bracing Toolpath
+                // The Outer Wall is always the slice contour, regardless
+                // of flip direction. The projected curve (inward or outward
+                // depending on flip) is just the bracing's anchor — neither
+                // baked nor printed.
                 var layerPts = new List<Point3d>();
                 for (int i = 0; i < goodContours.Count; i++)
                 {
-                    var innerLayerCurve = flipInward
-                        ? goodContours[i]
-                        : results[i].InnerCurve;
-                    var outerLayerCurve = flipInward
-                        ? results[i].InnerCurve
-                        : goodContours[i];
-
-                    if (innerLayerCurve != null)
-                        AddCurvePoints(innerLayerCurve, layerPts);
-                    if (outerLayerCurve != null)
-                        AddCurvePoints(outerLayerCurve, layerPts);
+                    if (goodContours[i] != null)
+                        AddCurvePoints(goodContours[i], layerPts);
                     if (results[i].Zigzag != null)
                         AddCurvePoints(results[i].Zigzag, layerPts);
                 }
@@ -826,9 +1177,18 @@ namespace CCL_Clay3DP.UI
                     LayerCount = goodContours.Count,
                 };
 
-                SetStatus(
+                // Skirt from the absolute lowest contour, NOT goodContours[0]
+                // — the skirt is independent of which layers passed the
+                // bracing filter (Issue #8).
+                var skirtBraced = SkirtBuilder.BuildSkirt(contours[0]);
+                BakeSkirt(RhinoDoc.ActiveDoc, skirtBraced);
+                _lastResult.SkirtCurve = skirtBraced;
+                _lastResult.SkirtFrames = SkirtBuilder.SampleSkirtFrames(
+                    skirtBraced, _settings.Helix.FramesPerLayer);
+
+                SetStatus(WithTranslationNote(
                     $"Layer slice + bracing complete: {results.Count} layers" +
-                    (skipped > 0 ? $", {skipped} skipped" : ""));
+                    (skipped > 0 ? $", {skipped} skipped" : "")));
             }
             catch (Exception ex)
             {
@@ -839,7 +1199,7 @@ namespace CCL_Clay3DP.UI
 
         /// <summary>
         /// Bake outer contours only (Layer Slice without bracing). Uses the
-        /// Outer Toolpath layer so Pipes can pick them up uniformly.
+        /// Outer Toolpath layer so Preview Clay Model can pick them up uniformly.
         /// </summary>
         private void BakeLayerContours(List<Curve> contours)
         {
@@ -931,8 +1291,6 @@ namespace CCL_Clay3DP.UI
 
             int outerToolpathLayer = EnsureLayer(doc, "3DP::Outer Toolpath",
                 System.Drawing.Color.FromArgb(180, 180, 180));
-            int innerToolpathLayer = EnsureLayer(doc, "3DP::Inner Toolpath",
-                System.Drawing.Color.FromArgb(80, 120, 220));
             int outerPtsLayer = EnsureLayer(doc, "3DP::Bracing Outer Points",
                 System.Drawing.Color.FromArgb(40, 40, 40));
             int innerPtsLayer = EnsureLayer(doc, "3DP::Bracing Inner Points",
@@ -942,16 +1300,12 @@ namespace CCL_Clay3DP.UI
             int arrowLayer = EnsureLayer(doc, "3DP::Bracing Vectors",
                 System.Drawing.Color.FromArgb(220, 40, 40));
 
-            // When flipped, the projected curve is geometrically OUTSIDE the
-            // original slice. Swap the layer/name assignments for both curves
-            // and their sample points so "Outer Toolpath" always holds the
-            // geometrically outer data and "Inner Toolpath" the inner data.
-            int sliceCurveTarget = flipInward ? innerToolpathLayer : outerToolpathLayer;
-            int projectedCurveTarget = flipInward ? outerToolpathLayer : innerToolpathLayer;
+            // We only bake the outer toolpath (and bracing); the projected
+            // inner curve is computed for bracing geometry but not printed
+            // and not baked. Flip swaps which underlying curve is the
+            // geometrically outer one, and which set of points is which.
             int slicePointsTarget = flipInward ? innerPtsLayer : outerPtsLayer;
             int projectedPointsTarget = flipInward ? outerPtsLayer : innerPtsLayer;
-            string sliceCurveName = flipInward ? "InnerToolpath" : "OuterToolpath";
-            string projectedCurveName = flipInward ? "OuterToolpath" : "InnerToolpath";
             string slicePointsName = flipInward ? "BracingInnerPoint" : "BracingOuterPoint";
             string projectedPointsName = flipInward ? "BracingOuterPoint" : "BracingInnerPoint";
 
@@ -962,10 +1316,15 @@ namespace CCL_Clay3DP.UI
                 var contour = contours[i];
                 var r = results[i];
 
+                // The Outer Wall is ALWAYS the slice contour (= the input
+                // Brep/Mesh's actual outline at this Z). Flip only changes
+                // which side the bracing extends to (inward by default,
+                // outward when flipped) — it doesn't change which curve
+                // is the outer wall.
                 if (contour != null && contour.IsValid)
                 {
-                    attrs.LayerIndex = sliceCurveTarget;
-                    attrs.Name = sliceCurveName;
+                    attrs.LayerIndex = outerToolpathLayer;
+                    attrs.Name = "OuterToolpath";
                     doc.Objects.AddCurve(contour, attrs);
                 }
 
@@ -976,13 +1335,6 @@ namespace CCL_Clay3DP.UI
                 attrs.LayerIndex = projectedPointsTarget;
                 attrs.Name = projectedPointsName;
                 foreach (var p in r.InnerPoints) doc.Objects.AddPoint(p, attrs);
-
-                if (r.InnerCurve != null && r.InnerCurve.IsValid)
-                {
-                    attrs.LayerIndex = projectedCurveTarget;
-                    attrs.Name = projectedCurveName;
-                    doc.Objects.AddCurve(r.InnerCurve, attrs);
-                }
 
                 // Inward-direction arrows: one LineCurve per sample point,
                 // with EndArrowhead decoration. Always points from slice
@@ -1010,12 +1362,10 @@ namespace CCL_Clay3DP.UI
                 }
             }
 
-            // Both toolpath layers visible — they're the real output.
-            // Point and arrow helpers hidden by default.
+            // Outer toolpath visible — real print path. Point and arrow
+            // helpers hidden by default.
             if (outerToolpathLayer >= 0 && outerToolpathLayer < doc.Layers.Count)
                 doc.Layers[outerToolpathLayer].IsVisible = true;
-            if (innerToolpathLayer >= 0 && innerToolpathLayer < doc.Layers.Count)
-                doc.Layers[innerToolpathLayer].IsVisible = true;
             if (outerPtsLayer >= 0 && outerPtsLayer < doc.Layers.Count)
                 doc.Layers[outerPtsLayer].IsVisible = false;
             if (innerPtsLayer >= 0 && innerPtsLayer < doc.Layers.Count)
@@ -1026,7 +1376,7 @@ namespace CCL_Clay3DP.UI
             doc.Views.Redraw();
         }
 
-        private void OnPipesClick(object sender, EventArgs e)
+        private void OnPreviewClayModelClick(object sender, EventArgs e)
         {
             try
             {
@@ -1044,8 +1394,8 @@ namespace CCL_Clay3DP.UI
 
                 // Source layers: covers every mode that produces a toolpath
                 // curve. Spiral mode emits one curve on Spiral Toolpath;
-                // Layer / Layer+Bracing modes emit up to three. Pipes grabs
-                // whichever exist.
+                // Layer / Layer+Bracing modes emit up to three. The clay
+                // preview pipes whichever exist.
                 var sourceLayerNames = new[]
                 {
                     "3DP::Spiral Toolpath",
@@ -1075,38 +1425,43 @@ namespace CCL_Clay3DP.UI
 
                 if (curves.Count == 0)
                 {
-                    SetStatus("No curves on zigzag layers");
+                    SetStatus("No toolpath curves to preview — run Slice first");
                     return;
                 }
 
-                // Warn before starting — piping can take a while on dense stacks
-                // and users were getting spooked by the hang.
+                // Warn before starting — generation can take a while on dense
+                // stacks and users were getting spooked by the hang.
                 var confirm = MessageBox.Show(
                     this,
-                    $"About to pipe {curves.Count} curves at {diameter:F2} mm " +
-                    "bead diameter.\n\nThis can take a few moments on dense " +
-                    "geometry. Continue?",
-                    "CCL_Clay3DP — Generate pipes",
+                    $"About to build the clay model preview from {curves.Count} " +
+                    $"toolpath curves at {diameter:F2} mm bead diameter.\n\n" +
+                    "This can take a few moments on dense geometry. Continue?",
+                    "CCL_Clay3DP — Preview Clay Model",
                     MessageBoxButtons.YesNo,
                     MessageBoxType.Information,
                     MessageBoxDefaultButton.Yes);
                 if (confirm != DialogResult.Yes)
                 {
-                    SetStatus("Pipes cancelled");
+                    SetStatus("Preview cancelled");
                     return;
                 }
 
-                int pipesLayer = EnsureLayer(doc, "3DP::Toolpath Pipes",
-                    System.Drawing.Color.FromArgb(220, 180, 80));
+                // Layer color and render material both follow the active clay
+                // preset (Porcelain / Stoneware / Earthenware) so the preview
+                // reads as actual material in Wireframe, Shaded, and Rendered
+                // display modes alike.
+                var clayPbr = ClayPreviewMaterials.Get(_settings.Clay.PresetName);
+                int clayLayer = EnsureLayer(doc, "3DP::Clay Model", clayPbr.BaseColor);
+                EnsureClayRenderMaterial(doc, clayLayer, _settings.Clay.PresetName, clayPbr);
 
                 var attrs = new ObjectAttributes
                 {
-                    LayerIndex = pipesLayer,
-                    Name = "ToolpathPipe",
+                    LayerIndex = clayLayer,
+                    Name = "ClayModelMesh",
                 };
 
                 Rhino.UI.StatusBar.ShowProgressMeter(
-                    0, curves.Count, "CCL_Clay3DP: piping", true, true);
+                    0, curves.Count, "CCL_Clay3DP: building clay preview", true, true);
                 var lastUpdate = DateTime.Now;
 
                 int pipedOk = 0, failed = 0;
@@ -1143,22 +1498,22 @@ namespace CCL_Clay3DP.UI
                         }
                     }
 
-                    Mesh pipe = null;
+                    Mesh tube = null;
                     try
                     {
-                        pipe = Mesh.CreateFromCurvePipe(
+                        tube = Mesh.CreateFromCurvePipe(
                             pipeInput, radius, 12, 1,
                             MeshPipeCapStyle.Flat, false);
                     }
-                    catch (Exception pipeEx)
+                    catch (Exception tubeEx)
                     {
                         RhinoApp.WriteLine(
-                            $"[CCL_Clay3DP] Pipe failed on curve: {pipeEx.Message}");
+                            $"[CCL_Clay3DP] Bead tube failed on curve: {tubeEx.Message}");
                     }
 
-                    if (pipe != null && pipe.IsValid)
+                    if (tube != null && tube.IsValid)
                     {
-                        doc.Objects.AddMesh(pipe, attrs);
+                        doc.Objects.AddMesh(tube, attrs);
                         pipedOk++;
                     }
                     else
@@ -1196,7 +1551,7 @@ namespace CCL_Clay3DP.UI
                     {
                         lastUpdate = now;
                         Rhino.UI.StatusBar.SetMessagePane(
-                            $"CCL_Clay3DP: piping {i + 1}/{curves.Count}");
+                            $"CCL_Clay3DP: clay preview {i + 1}/{curves.Count}");
                         RhinoApp.Wait();
                     }
                 }
@@ -1204,14 +1559,14 @@ namespace CCL_Clay3DP.UI
 
                 doc.Views.Redraw();
                 SetStatus(
-                    $"Pipes: {pipedOk}/{curves.Count} meshes" +
+                    $"Clay model preview: {pipedOk}/{curves.Count} meshes" +
                     (failed > 0 ? $" ({failed} failed)" : ""));
             }
             catch (Exception ex)
             {
                 Rhino.UI.StatusBar.HideProgressMeter();
-                SetStatus($"Pipes error: {ex.Message}");
-                RhinoApp.WriteLine($"[CCL_Clay3DP] Pipes failed: {ex}");
+                SetStatus($"Preview error: {ex.Message}");
+                RhinoApp.WriteLine($"[CCL_Clay3DP] Preview Clay Model failed: {ex}");
             }
         }
 
@@ -1292,6 +1647,15 @@ namespace CCL_Clay3DP.UI
         {
             _statusLabel.Text = $"Status: {message}";
             RhinoApp.WriteLine($"[CCL_Clay3DP] {message}");
+        }
+
+        // Append the most recent slice's translation note to a status, then
+        // consume it so it isn't repeated on later (non-slice) status lines.
+        private string WithTranslationNote(string baseMsg)
+        {
+            string note = _lastTranslationNote;
+            _lastTranslationNote = null;
+            return string.IsNullOrEmpty(note) ? baseMsg : $"{baseMsg} — {note}";
         }
 
         private void SetDetail(int frames, int issues)

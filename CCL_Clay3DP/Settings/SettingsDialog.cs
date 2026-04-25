@@ -33,19 +33,16 @@ namespace CCL_Clay3DP.Settings
 
         // Toolpath fields
         private CheckBox _spiralSliceCheck;
-        private CheckBox _innerWallBracingCheck;
+        private CheckBox _outerWallBracingCheck;
+        private CheckBox _spiralFollowsCurveNormalCheck;
         private NumericStepper _layerHeight;
         private NumericStepper _radialOffset;
         private NumericStepper _startAngle;
         private DropDown _directionDropDown;
         private NumericStepper _framesPerLayer;
-        private NumericStepper _heightOffsetBottom;
-        private NumericStepper _heightOffsetTop;
-        private NumericStepper _ribbonWidth;
 
         // Robot fields
         private NumericStepper _feedRate;
-        private NumericStepper _travelSpeed;
         private DropDown _tiltModeDropDown;
         private NumericStepper _leadAngle;
         private NumericStepper _verticalBias;
@@ -55,6 +52,21 @@ namespace CCL_Clay3DP.Settings
         private TextBox _roboDKExePath;
         private TextBox _stationTemplatePath;
         private TextBox _projectName;
+
+        // Build Volume fields (Issue #8 follow-up). Z always starts at 0
+        // (build plate); only the X/Y bounds and the upper Z height are
+        // user-settable.
+        private NumericStepper _buildVolumeXMin;
+        private NumericStepper _buildVolumeXMax;
+        private NumericStepper _buildVolumeYMin;
+        private NumericStepper _buildVolumeYMax;
+        private NumericStepper _buildVolumeHeight;
+
+        // Set to true while we programmatically toggle the
+        // _spiralFollowsCurveNormalCheck checkbox (LoadValues, mode-switch
+        // force-uncheck, or post-warning revert) so the user-facing warning
+        // popup only fires on a genuine user click.
+        private bool _suppressSpiralNormalWarning = false;
 
         public SettingsDialog(PipelineSettings settings)
         {
@@ -101,10 +113,16 @@ namespace CCL_Clay3DP.Settings
             // --- Toolpath ---
             _spiralSliceCheck = new CheckBox { Text = "Spiral Slice (off = Layer Slice)" };
             _spiralSliceCheck.CheckedChanged += (s, e) => UpdateToolpathFieldsEnabled();
-            _innerWallBracingCheck = new CheckBox
+            _outerWallBracingCheck = new CheckBox
             {
-                Text = "Inner Wall Bracing (Layer Slice only)"
+                Text = "Outer Wall Bracing (Layer Slice only)"
             };
+            _spiralFollowsCurveNormalCheck = new CheckBox
+            {
+                Text = "Spiral follows curve normal (Spiral Slice only)"
+            };
+            _spiralFollowsCurveNormalCheck.CheckedChanged +=
+                OnSpiralFollowsCurveNormalChanged;
 
             _layerHeight = CreateStepper(0.1, 50.0, 0.5, 1);
             _radialOffset = CreateStepper(-100.0, 100.0, 0.5, 1);
@@ -113,9 +131,6 @@ namespace CCL_Clay3DP.Settings
             _directionDropDown.Items.Add("CCW");
             _directionDropDown.Items.Add("CW");
             _framesPerLayer = CreateStepper(36, 3600, 36, 0);
-            _heightOffsetBottom = CreateStepper(0.0, 1000.0, 1.0, 1);
-            _heightOffsetTop = CreateStepper(0.0, 1000.0, 1.0, 1);
-            _ribbonWidth = CreateStepper(0.1, 100.0, 0.5, 1);
 
             var spiralGroup = new GroupBox
             {
@@ -127,22 +142,19 @@ namespace CCL_Clay3DP.Settings
                     Rows =
                     {
                         new TableRow(null, _spiralSliceCheck),
-                        new TableRow(null, _innerWallBracingCheck),
+                        new TableRow(null, _outerWallBracingCheck),
+                        new TableRow(null, _spiralFollowsCurveNormalCheck),
                         LabeledRow("Layer height (mm)", _layerHeight),
                         LabeledRow("Radial offset (mm)", _radialOffset),
                         LabeledRow("Start angle (deg)", _startAngle),
                         LabeledRow("Direction", _directionDropDown),
                         LabeledRow("Frames per layer", _framesPerLayer),
-                        LabeledRow("Height offset bottom (mm)", _heightOffsetBottom),
-                        LabeledRow("Height offset top (mm)", _heightOffsetTop),
-                        LabeledRow("Ribbon width (mm)", _ribbonWidth),
                     },
                 },
             };
 
             // --- Robot / Printer ---
             _feedRate = CreateStepper(1.0, 500.0, 10.0, 1);
-            _travelSpeed = CreateStepper(1.0, 500.0, 10.0, 1);
             _tiltModeDropDown = new DropDown();
             _tiltModeDropDown.Items.Add("Normal");
             _tiltModeDropDown.Items.Add("Lead-Lag");
@@ -166,6 +178,33 @@ namespace CCL_Clay3DP.Settings
             var browseStation = new Button { Text = "..." };
             browseStation.Click += (s, e) => BrowseFile(_stationTemplatePath, "RoboDK Station", "*.rdk");
 
+            // --- Build Volume ---
+            // Wide ranges so any reasonable robot cell fits. The wireframe
+            // box bakes onto layer "3DP::Build Volume" at slice time.
+            _buildVolumeXMin = CreateStepper(-5000.0, 0.0, 10.0, 0);
+            _buildVolumeXMax = CreateStepper(0.0, 5000.0, 10.0, 0);
+            _buildVolumeYMin = CreateStepper(-5000.0, 0.0, 10.0, 0);
+            _buildVolumeYMax = CreateStepper(0.0, 5000.0, 10.0, 0);
+            _buildVolumeHeight = CreateStepper(1.0, 5000.0, 10.0, 0);
+
+            var buildVolumeGroup = new GroupBox
+            {
+                Text = "Build Volume (mm)",
+                Content = new TableLayout
+                {
+                    Spacing = new Size(8, 4),
+                    Padding = new Padding(8),
+                    Rows =
+                    {
+                        LabeledRow("X min", _buildVolumeXMin),
+                        LabeledRow("X max", _buildVolumeXMax),
+                        LabeledRow("Y min", _buildVolumeYMin),
+                        LabeledRow("Y max", _buildVolumeYMax),
+                        LabeledRow("Z height (Z min always 0)", _buildVolumeHeight),
+                    },
+                },
+            };
+
             var robotGroup = new GroupBox
             {
                 Text = "Robot / Printer",
@@ -176,7 +215,6 @@ namespace CCL_Clay3DP.Settings
                     Rows =
                     {
                         LabeledRow("Feed rate (mm/s)", _feedRate),
-                        LabeledRow("Travel speed (mm/s)", _travelSpeed),
                         LabeledRow("Tilt mode", _tiltModeDropDown),
                         LabeledRow("Lead angle (deg)", _leadAngle),
                         LabeledRow("Vertical bias (0-1)", _verticalBias),
@@ -201,8 +239,47 @@ namespace CCL_Clay3DP.Settings
             var cancelButton = new Button { Text = "Cancel" };
             cancelButton.Click += (s, e) => Close(false);
 
+            var importButton = new Button { Text = "Import..." };
+            importButton.Click += OnImportClick;
+
+            var exportButton = new Button { Text = "Export..." };
+            exportButton.Click += OnExportClick;
+
             DefaultButton = okButton;
             AbortButton = cancelButton;
+
+            // The settings groups go inside a Scrollable so smaller laptop
+            // displays get scrollbars instead of having the OK/Cancel row
+            // pushed off-screen. The button row sits OUTSIDE the Scrollable
+            // so it stays visible regardless of how the user scrolls.
+            var scrollableContent = new Scrollable
+            {
+                Border = BorderType.None,
+                ExpandContentWidth = true,
+                ExpandContentHeight = false,
+                Content = new TableLayout
+                {
+                    Spacing = new Size(0, 8),
+                    Padding = new Padding(0),
+                    Rows =
+                    {
+                        new TableRow(clayGroup),
+                        new TableRow(spiralGroup),
+                        new TableRow(robotGroup),
+                        new TableRow(buildVolumeGroup),
+                        null, // soak any extra vertical space inside the scroller
+                    },
+                },
+            };
+
+            var buttonRow = new TableLayout
+            {
+                Spacing = new Size(8, 0),
+                Rows =
+                {
+                    new TableRow(importButton, exportButton, null, cancelButton, okButton),
+                },
+            };
 
             Content = new TableLayout
             {
@@ -210,17 +287,8 @@ namespace CCL_Clay3DP.Settings
                 Padding = new Padding(12),
                 Rows =
                 {
-                    new TableRow(clayGroup),
-                    new TableRow(spiralGroup),
-                    new TableRow(robotGroup),
-                    new TableRow(new TableLayout
-                    {
-                        Spacing = new Size(8, 0),
-                        Rows =
-                        {
-                            new TableRow(null, cancelButton, okButton),
-                        },
-                    }),
+                    new TableRow(new TableCell(scrollableContent, true)) { ScaleHeight = true },
+                    new TableRow(buttonRow),
                 },
             };
         }
@@ -237,19 +305,18 @@ namespace CCL_Clay3DP.Settings
 
             // Toolpath
             _spiralSliceCheck.Checked = _settings.Helix.SpiralSlice;
-            _innerWallBracingCheck.Checked = _settings.Helix.InnerWallBracing;
+            _outerWallBracingCheck.Checked = _settings.Helix.OuterWallBracing;
+            _suppressSpiralNormalWarning = true;
+            _spiralFollowsCurveNormalCheck.Checked = _settings.Helix.SpiralFollowsCurveNormal;
+            _suppressSpiralNormalWarning = false;
             _layerHeight.Value = _settings.Helix.LayerHeight;
             _radialOffset.Value = _settings.Helix.RadialOffset;
             _startAngle.Value = _settings.Helix.StartAngle;
             _directionDropDown.SelectedIndex = _settings.Helix.DirectionCCW ? 0 : 1;
             _framesPerLayer.Value = _settings.Helix.FramesPerLayer;
-            _heightOffsetBottom.Value = _settings.Height.HeightOffsetBottom;
-            _heightOffsetTop.Value = _settings.Height.HeightOffsetTop;
-            _ribbonWidth.Value = _settings.Ribbon.RibbonWidth;
 
             // Robot
             _feedRate.Value = _settings.Robot.FeedRate;
-            _travelSpeed.Value = _settings.Robot.TravelSpeed;
             _tiltModeDropDown.SelectedIndex = (int)_settings.Robot.TiltMode;
             _leadAngle.Value = _settings.Robot.LeadAngle;
             _verticalBias.Value = _settings.Robot.VerticalBias;
@@ -263,11 +330,27 @@ namespace CCL_Clay3DP.Settings
             _stationTemplatePath.Text = _settings.Robot.RoboDKStationTemplatePath;
             _projectName.Text = _settings.Robot.RoboDKProjectName;
 
+            // Build Volume
+            _buildVolumeXMin.Value = _settings.BuildVolume.XMin;
+            _buildVolumeXMax.Value = _settings.BuildVolume.XMax;
+            _buildVolumeYMin.Value = _settings.BuildVolume.YMin;
+            _buildVolumeYMax.Value = _settings.BuildVolume.YMax;
+            _buildVolumeHeight.Value = _settings.BuildVolume.Height;
+
             UpdateTiltFieldsEnabled();
             UpdateToolpathFieldsEnabled();
         }
 
         private void SaveValues()
+        {
+            ApplyDialogToSettings();
+            SettingsManager.Save(_settings);
+        }
+
+        // Copy every dialog field into _settings without touching disk.
+        // OK button writes _settings to the global config; Export writes
+        // it to a user-chosen path. Both share this mutation step.
+        private void ApplyDialogToSettings()
         {
             // Clay
             _settings.Clay.PresetName = _presetDropDown.SelectedValue?.ToString() ?? "Custom";
@@ -278,19 +361,16 @@ namespace CCL_Clay3DP.Settings
 
             // Toolpath
             _settings.Helix.SpiralSlice = _spiralSliceCheck.Checked ?? true;
-            _settings.Helix.InnerWallBracing = _innerWallBracingCheck.Checked ?? false;
+            _settings.Helix.OuterWallBracing = _outerWallBracingCheck.Checked ?? false;
+            _settings.Helix.SpiralFollowsCurveNormal = _spiralFollowsCurveNormalCheck.Checked ?? false;
             _settings.Helix.LayerHeight = _layerHeight.Value;
             _settings.Helix.RadialOffset = _radialOffset.Value;
             _settings.Helix.StartAngle = _startAngle.Value;
             _settings.Helix.DirectionCCW = _directionDropDown.SelectedIndex == 0;
             _settings.Helix.FramesPerLayer = (int)_framesPerLayer.Value;
-            _settings.Height.HeightOffsetBottom = _heightOffsetBottom.Value;
-            _settings.Height.HeightOffsetTop = _heightOffsetTop.Value;
-            _settings.Ribbon.RibbonWidth = _ribbonWidth.Value;
 
             // Robot
             _settings.Robot.FeedRate = _feedRate.Value;
-            _settings.Robot.TravelSpeed = _travelSpeed.Value;
             _settings.Robot.TiltMode = (TiltMode)_tiltModeDropDown.SelectedIndex;
             _settings.Robot.LeadAngle = _leadAngle.Value;
             _settings.Robot.VerticalBias = _verticalBias.Value;
@@ -301,7 +381,12 @@ namespace CCL_Clay3DP.Settings
             _settings.Robot.RoboDKStationTemplatePath = _stationTemplatePath.Text;
             _settings.Robot.RoboDKProjectName = _projectName.Text;
 
-            SettingsManager.Save(_settings);
+            // Build Volume
+            _settings.BuildVolume.XMin = _buildVolumeXMin.Value;
+            _settings.BuildVolume.XMax = _buildVolumeXMax.Value;
+            _settings.BuildVolume.YMin = _buildVolumeYMin.Value;
+            _settings.BuildVolume.YMax = _buildVolumeYMax.Value;
+            _settings.BuildVolume.Height = _buildVolumeHeight.Value;
         }
 
         private void OnPresetChanged(object sender, EventArgs e)
@@ -331,19 +416,108 @@ namespace CCL_Clay3DP.Settings
 
         /// <summary>
         /// Gray out fields that only apply to one toolpath mode:
-        ///  - Radial offset, Start angle, Ribbon width: spiral-only → disabled when Layer Slice
-        ///  - Inner Wall Bracing: layer-slice only → disabled AND auto-unchecked when Spiral Slice
+        ///  - Radial offset, Start angle: spiral-only → disabled when Layer Slice
+        ///  - Outer Wall Bracing: layer-slice only → disabled AND auto-unchecked when Spiral Slice
+        ///  - Spiral follows curve normal: spiral-only → disabled AND auto-unchecked when Layer Slice
         /// </summary>
         private void UpdateToolpathFieldsEnabled()
         {
             bool spiral = _spiralSliceCheck.Checked ?? true;
             _radialOffset.Enabled = spiral;
             _startAngle.Enabled = spiral;
-            _ribbonWidth.Enabled = spiral;
-            _innerWallBracingCheck.Enabled = !spiral;
-            // Force-uncheck when spiraling — leaving a grayed-but-checked box
-            // is confusing and the value is ignored anyway in spiral mode.
-            if (spiral) _innerWallBracingCheck.Checked = false;
+            _outerWallBracingCheck.Enabled = !spiral;
+            _spiralFollowsCurveNormalCheck.Enabled = spiral;
+            // Force-uncheck when a checkbox is inapplicable to the current
+            // mode — leaving a grayed-but-checked box is confusing, and the
+            // value is ignored anyway in the inactive mode. Suppress the
+            // curve-normal warning popup since this is a programmatic toggle,
+            // not a user click.
+            if (spiral) _outerWallBracingCheck.Checked = false;
+            if (!spiral)
+            {
+                _suppressSpiralNormalWarning = true;
+                _spiralFollowsCurveNormalCheck.Checked = false;
+                _suppressSpiralNormalWarning = false;
+            }
+        }
+
+        /// <summary>
+        /// Fired when the user toggles the "Spiral follows curve normal"
+        /// checkbox. On enable, shows a red-header WARNING modal — banking
+        /// the build plate to follow surface normals can drive the robot
+        /// into joint limits, singularities, or self-collision depending on
+        /// part geometry. If the user cancels, the checkbox is reverted.
+        /// </summary>
+        private void OnSpiralFollowsCurveNormalChanged(object sender, EventArgs e)
+        {
+            if (_suppressSpiralNormalWarning) return;
+            if (_spiralFollowsCurveNormalCheck.Checked != true) return;
+
+            if (!ConfirmSpiralCurveNormalWarning())
+            {
+                _suppressSpiralNormalWarning = true;
+                _spiralFollowsCurveNormalCheck.Checked = false;
+                _suppressSpiralNormalWarning = false;
+            }
+        }
+
+        /// <summary>
+        /// Modal warning dialog with a red, bold "W A R N I N G !" header
+        /// and Cancel as the safe default. Returns true if the user
+        /// explicitly clicks "Continue anyway".
+        /// </summary>
+        private bool ConfirmSpiralCurveNormalWarning()
+        {
+            var dlg = new Dialog<bool>
+            {
+                Title = "CCL_Clay3DP — Surface-normal tool tilt",
+                MinimumSize = new Size(480, 220),
+                Resizable = false,
+            };
+
+            var headerLabel = new Label
+            {
+                Text = "W A R N I N G !",
+                TextColor = Colors.Red,
+                Font = new Font(SystemFont.Bold, 16),
+                TextAlignment = TextAlignment.Center,
+            };
+
+            var bodyLabel = new Label
+            {
+                Text =
+                    "Review your machining path carefully in RoboDK as you " +
+                    "will likely crash your robot.\n\n" +
+                    "This is to be used with serious caution.",
+                Wrap = WrapMode.Word,
+            };
+
+            var continueBtn = new Button { Text = "Continue anyway" };
+            continueBtn.Click += (s, e) => dlg.Close(true);
+            var cancelBtn = new Button { Text = "Cancel" };
+            cancelBtn.Click += (s, e) => dlg.Close(false);
+
+            dlg.DefaultButton = cancelBtn;  // safe default — Enter cancels
+            dlg.AbortButton = cancelBtn;    // Esc cancels
+
+            dlg.Content = new TableLayout
+            {
+                Spacing = new Size(0, 14),
+                Padding = new Padding(20),
+                Rows =
+                {
+                    new TableRow(headerLabel),
+                    new TableRow(bodyLabel),
+                    null, // soak vertical space
+                    new TableRow(new TableLayout
+                    {
+                        Spacing = new Size(8, 0),
+                        Rows = { new TableRow(null, cancelBtn, continueBtn) },
+                    }),
+                },
+            };
+
+            return dlg.ShowModal(this);
         }
 
         private static NumericStepper CreateStepper(double min, double max, double increment, int decimals)
@@ -383,6 +557,72 @@ namespace CCL_Clay3DP.Settings
             dialog.Filters.Add(new FileFilter(filterName, filterExt));
             if (dialog.ShowDialog(this) == DialogResult.Ok)
                 target.Text = dialog.FileName;
+        }
+
+        // Bake current dialog values into _settings, then write that
+        // snapshot to a user-chosen JSON file. Strictly side-effect-free
+        // for the global config — the user must still click OK to persist.
+        private void OnExportClick(object sender, EventArgs e)
+        {
+            ApplyDialogToSettings();
+
+            var sfd = new SaveFileDialog
+            {
+                Title = "Export CCL_Clay3DP Settings",
+                FileName = "ccl_clay3dp_settings.json",
+            };
+            sfd.Filters.Add(new FileFilter("Settings (*.json)", "*.json"));
+            if (sfd.ShowDialog(this) != DialogResult.Ok) return;
+
+            string path = sfd.FileName;
+            // Eto on some platforms doesn't auto-append the filter extension.
+            if (!path.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+                path += ".json";
+
+            try
+            {
+                SettingsManager.SaveTo(_settings, path);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this,
+                    $"Could not write settings file:\n{ex.Message}",
+                    "Export failed", MessageBoxType.Error);
+            }
+        }
+
+        // Read settings from a user-chosen JSON file into _settings, then
+        // refresh every dialog field from those values. Imported values are
+        // pending until the user clicks OK.
+        private void OnImportClick(object sender, EventArgs e)
+        {
+            var ofd = new OpenFileDialog
+            {
+                Title = "Import CCL_Clay3DP Settings",
+            };
+            ofd.Filters.Add(new FileFilter("Settings (*.json)", "*.json"));
+            if (ofd.ShowDialog(this) != DialogResult.Ok) return;
+
+            PipelineSettings loaded;
+            try
+            {
+                loaded = SettingsManager.LoadFrom(ofd.FileName);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this,
+                    $"Could not read settings file:\n{ex.Message}",
+                    "Import failed", MessageBoxType.Error);
+                return;
+            }
+
+            _settings.Clay = loaded.Clay;
+            _settings.Height = loaded.Height;
+            _settings.Helix = loaded.Helix;
+            _settings.Robot = loaded.Robot;
+            if (loaded.BuildVolume != null)
+                _settings.BuildVolume = loaded.BuildVolume;
+            LoadValues();
         }
     }
 }

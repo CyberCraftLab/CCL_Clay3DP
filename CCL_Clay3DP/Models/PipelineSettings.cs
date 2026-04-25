@@ -19,7 +19,7 @@ namespace CCL_Clay3DP.Models
         public ClayMaterialSettings Clay { get; set; } = new ClayMaterialSettings();
         public HeightParameters Height { get; set; } = new HeightParameters();
         public HelixParameters Helix { get; set; } = new HelixParameters();
-        public RibbonParameters Ribbon { get; set; } = new RibbonParameters();
         public RobotSettings Robot { get; set; } = new RobotSettings();
+        public BuildVolumeSettings BuildVolume { get; set; } = new BuildVolumeSettings();
     }
 }

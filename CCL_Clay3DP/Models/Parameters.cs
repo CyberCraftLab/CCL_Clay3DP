@@ -27,12 +27,37 @@ namespace CCL_Clay3DP.Models
     {
         public Brep Brep { get; set; }
         public Mesh Mesh { get; set; }
+
+        // ObjectId of the source Rhino object the user picked, when one
+        // exists. Empty Guid for synthetic / transformed copies (e.g.,
+        // the result of ApplyTransform after Issue #1's auto-translation
+        // — that copy has no document representation). Used by the
+        // panel to hide the original on slice and restore it on settings
+        // change.
+        public System.Guid SourceObjectId { get; set; } = System.Guid.Empty;
     }
 
     public class HeightParameters
     {
         public double HeightOffsetBottom { get; set; } = 0.0;
         public double HeightOffsetTop { get; set; } = 0.0;
+    }
+
+    // Cell-specific build volume — the printable space the robot can
+    // physically reach with the extruder. Used to render a wireframe
+    // box at slice time so users can see whether their part fits, and
+    // to center new geometry on the build plate (Issue #1 origin
+    // translation puts bbox bottom-center at world origin, which is
+    // also (XMin+XMax)/2, (YMin+YMax)/2 of this volume when symmetric).
+    //
+    // Z always starts at 0 (build plate). Height = upper Z extent.
+    public class BuildVolumeSettings
+    {
+        public double XMin { get; set; } = -200.0;
+        public double XMax { get; set; } =  200.0;
+        public double YMin { get; set; } = -200.0;
+        public double YMax { get; set; } =  200.0;
+        public double Height { get; set; } = 1000.0;
     }
 
     public class HelixParameters
@@ -49,17 +74,21 @@ namespace CCL_Clay3DP.Models
         // whether we also emit the inner curve + zigzag structural pattern.
         public bool SpiralSlice { get; set; } = true;
 
-        // Layer-slice only — ignored when SpiralSlice is true. Generates the
-        // inner wall curves and zigzag pattern between outer and inner as a
-        // structural bracing. FramesPerLayer also controls the zigzag point
-        // count in this mode.
-        public bool InnerWallBracing { get; set; } = false;
+        // Layer-slice only — ignored when SpiralSlice is true. Generates a
+        // zigzag bracing pattern attached to the outer wall, anchored to a
+        // virtual inner offset (computed but neither baked nor printed).
+        // FramesPerLayer also controls the zigzag point count in this mode.
+        public bool OuterWallBracing { get; set; } = false;
+
+        // Spiral-slice only — ignored when SpiralSlice is false. When true the
+        // build plate tilts so the tool follows the spiral curve like an
+        // airplane: fuselage along the curve tangent T, wings along the
+        // underlying Brep/Mesh surface normal N, and the "tail" / tool Z axis
+        // along N × T. For vase-mode prints this keeps the plate nearly flat
+        // with a slight pitch matching the spiral rise; for sloped / curved
+        // geometry the plate banks with the surface. Off by default — current
+        // Cartesian-Z behavior preserved for existing workflows.
+        public bool SpiralFollowsCurveNormal { get; set; } = false;
     }
 
-    public class RibbonParameters
-    {
-        public bool NormalOutward { get; set; } = true;
-        public double RibbonWidth { get; set; } = 5.0;
-        public bool HideBoundingCylinder { get; set; } = true;
-    }
 }
