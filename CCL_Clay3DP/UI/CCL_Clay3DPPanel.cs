@@ -338,6 +338,28 @@ namespace CCL_Clay3DP.UI
                 return;
             }
 
+            // Outer Wall Bracing gate — bracing's per-layer DivideByCount
+            // + seam-align algorithm only behaves on ruled / extrudable
+            // geometry. On free-form (sphere, organic Brep) the seam
+            // wanders between layers and the bracing twists into junk.
+            // Reject before mutating anything (no clear, no translate).
+            if (!_settings.Helix.SpiralSlice
+                && _settings.Helix.OuterWallBracing
+                && !GeometryCurvature.IsRuled(selection))
+            {
+                MessageBox.Show(this,
+                    "Outer Wall Bracing requires ruled / extruded geometry "
+                    + "(cylinders, prisms, cones, planar extrusions). The "
+                    + "selected part is free-form (has curvature in more "
+                    + "than one parametric direction).\n\n"
+                    + "Disable Outer Wall Bracing in Settings, or pick a "
+                    + "ruled-surface part, then click Slice again.",
+                    "Outer Wall Bracing not permitted",
+                    MessageBoxButtons.OK, MessageBoxType.Warning);
+                SetStatus("Bracing not permitted on free-form geometry — slice cancelled.");
+                return;
+            }
+
             // Clean slate: remove any generated output from a previous run
             // (including output from the OTHER mode) so what's in Rhino
             // always reflects the current Settings choice.
