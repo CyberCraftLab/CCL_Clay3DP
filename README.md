@@ -1,6 +1,8 @@
 # CCL_Clay3DP — Rhino 8 Plugin for Clay 3D Printing
 
-**Version: Alpha 1.1.0 — NOT a release candidate. Use at your own risk.**
+**Version: Alpha 1.1.1 — NOT a release candidate. Use at your own risk.**
+
+See [CHANGELOG.md](CHANGELOG.md) for what's new in this release.
 
 > 🚧 This plugin is in **alpha**. It is actively used in the CCL lab but is
 > not feature-frozen, has not been independently audited, and is known to
@@ -50,30 +52,55 @@ configuration in RoboDK.
    - **Spiral Slice** — continuous spiral between horizontal contours
      (vase mode, no Z-seam).
    - **Layer Slice** — discrete planar layer contours. With the optional
-     **Inner Wall Bracing** flag, each layer also gets an inward-offset
-     inner wall plus a triangle-wave "bracing" rib between the two walls
-     for structural stiffening. Robot print order per layer is
-     **Inner Toolpath → Outer Toolpath → Bracing Toolpath**, then up to
-     the next layer.
-2. **Printability analysis** — colors the geometry mesh in the viewport
+     **Outer Wall Bracing** flag, each layer also gets a triangle-wave
+     bracing rib anchored to an inward-offset projection (the
+     projection itself is not baked or printed, only the outer wall
+     and the bracing). Robot print order per layer is
+     **Outer Toolpath → Bracing Toolpath**, then up to the next layer.
+     Outer Wall Bracing only runs on ruled / extrudable geometry
+     (cylinders, prisms, cones, planar extrusions); the algorithm
+     refuses to run on free-form / organic Breps.
+2. **Skirt — always on.** Every part begins with a 15 mm outward
+   skirt loop printed before the part itself, derived from the lowest
+   contour. Primes the extruder, gives a visible alignment reference,
+   and closes the loop without lifting before the part starts.
+3. **Auto-translation to origin.** The selected geometry is moved so
+   its bbox bottom-center sits on world origin (commercial-slicer
+   convention) — model + toolpath + skirt + build-volume preview all
+   share the same frame of reference. Move is undoable with Ctrl+Z.
+4. **Printability analysis** — colors the geometry mesh in the viewport
    with a red-yellow-green heatmap showing where clay printing is at risk
    (overhang angles, layer bond, robot wrist velocity). Works in every
    mode; three channels (Clay, Robot, Both) all render to the mesh.
-3. **Preview Clay Model** — renders whichever toolpath curves exist
-   (`Spiral Toolpath` / `Outer Toolpath` / `Inner Toolpath` /
-   `Bracing Toolpath`) as mesh bead tubes at the configured Clay bead
-   diameter, with mesh-sphere joints at every vertex for continuity.
-4. **RoboDK integration** — opens the pre-configured `3DP_v0.4.rdk`
-   station, adds the toolpath as a Curve Follow object under the build
-   plate, links it to the `3DP_Template` machining project, and
-   regenerates the robot program using the CYARC KUKA post processor.
+5. **Preview Clay Model** — renders whichever toolpath curves exist
+   (`Spiral Toolpath` / `Outer Toolpath` / `Bracing Toolpath` / `Skirt`)
+   as mesh bead tubes at the configured Clay bead diameter, with
+   mesh-sphere joints at every vertex for continuity, plus a PBR
+   clay material per preset (Porcelain / Stoneware / Earthenware) for
+   realistic Rendered-viewport output.
+6. **Build Volume preview.** A wireframe box on layer
+   `3DP::Build Volume` shows the cell's printable space (X/Y bounds
+   and Z height configurable in Settings; CCL-ALTAR-01 default is
+   400 × 400 × 1000 mm centered on origin).
+7. **RoboDK integration** — opens the pre-configured `3DP_v0.4.rdk`
+   station, adds the toolpath (skirt + part as one continuous curve)
+   as a Curve Follow object under the build plate, links it to the
+   `3DP_Template` machining project, and regenerates the robot
+   program using the CYARC KUKA post processor.
 
 **Workflow gating.** The Settings form is the first thing the user must
 interact with; all other workflow buttons (Slice, Analyze, Send, Preview Clay Model)
 stay disabled until Settings has been reviewed once in the session.
 Switching between Spiral and Layer modes automatically clears the other
 mode's generated layers on the next Slice, so the Rhino Layers panel
-always reflects only the current mode.
+always reflects only the current mode. RoboDK never launches
+automatically — Send to RoboDK (or Run All) is the only thing that
+opens / re-sends to it.
+
+**Settings file Import / Export.** The Settings dialog has `Import…`
+and `Export…` buttons for round-tripping the entire configuration
+(Clay, Toolpath, Robot, Build Volume) as a JSON file. Useful for
+versioning lab configurations and sharing between machines.
 
 ## Repository layout
 
@@ -110,22 +137,25 @@ CCL_Clay3DP/
 │  ├─ ClayMaterialSettings.cs    Bead diameter, overhang, density
 │  ├─ ClayPresets.cs             Porcelain / Stoneware / Earthenware
 │  ├─ RobotSettings.cs           Feed/travel speed, spindle, tilt, nozzle tool
-│  ├─ Parameters.cs              Spiral + ribbon + height parameter objects
+│  ├─ Parameters.cs              Helix + height + build-volume + selection objects
 │  └─ PipelineSettings.cs        Top-level settings aggregate
 ├─ Core/
 │  ├─ ContourSlicer.cs           Horizontal-plane contour extraction
 │  ├─ SpiralInterpolator.cs      Seam-aligned spiral between contours
-│  ├─ FrameComputer.cs           Tool frames + ribbon mesh
+│  ├─ FrameComputer.cs           Tool frames (outward surface normal)
+│  ├─ SkirtBuilder.cs            Lowest-contour outward 15 mm skirt loop +
+│  │                              uniform-arclength frame sampler with +Z normal
+│  ├─ GeometryCurvature.cs       Ruled-surface gate for Outer Wall Bracing
 │  ├─ GeometrySelector.cs        Brep/Mesh picker
-│  └─ ThinwallSpiralResult.cs    Container for slicer output
+│  └─ ThinwallSpiralResult.cs    Container for slicer output (incl. skirt)
 ├─ Analysis/
 │  ├─ PrintabilityAnalyzer.cs    Per-frame score (overhang, bond, curv, wrist)
 │  ├─ PrintabilityResult.cs      Score container + issue report
 │  └─ HeatmapDisplay.cs          Vertex-colored mesh overlay in viewport
 ├─ Zigzag/
-│  └─ ZigzagGenerator.cs         Layer-mode inner-wall bracing generator:
-│                                in-plane inward projection + triangle-wave
-│                                weave, with hairpin trim for concave geometry
+│  └─ ZigzagGenerator.cs         Outer Wall Bracing generator: triangle-wave
+│                                weave anchored to an inward in-plane projection,
+│                                with hairpin trim for concave geometry
 └─ RoboDK/
    ├─ FrameSerializer.cs         Frames + settings → temp JSON
    └─ RoboDKSubprocess.cs        Generates & runs Python 3 script via RoboDK's
@@ -135,26 +165,29 @@ CCL_Clay3DP/
 ### Rhino layers produced
 
 All output lives under a shared `3DP` parent layer. Only the layers that
-the current slice mode needs are created; switching modes removes the
-others on the next Slice.
+the current slice mode needs are created; switching modes (or changing
+settings) removes the others on the next Slice.
 
 | Layer | Content | Visible by default |
 |---|---|---|
 | `3DP::Spiral Toolpath` | The spiral curve (Spiral mode) | yes |
-| `3DP::Ribbon` | Tool-orientation ribbon mesh (Spiral mode) | no (debug aid) |
 | `3DP::Outer Toolpath` | Outer wall curve per layer (Layer mode) | yes |
-| `3DP::Inner Toolpath` | Inner wall curve per layer (Layer + Bracing) | yes |
 | `3DP::Bracing Toolpath` | Triangle-wave rib per layer (Layer + Bracing) | yes |
 | `3DP::Bracing Vectors` | Inward-direction arrows (Layer + Bracing) | no (flip preview) |
 | `3DP::Bracing Outer Points` | Sample points on outer wall (Layer + Bracing) | no |
-| `3DP::Bracing Inner Points` | Sample points on inner wall (Layer + Bracing) | no |
+| `3DP::Bracing Inner Points` | Sample points on inward projection (Layer + Bracing) | no |
+| `3DP::Skirt` | Outward-offset skirt loop, 15 mm from lowest contour (always) | yes |
+| `3DP::Build Volume` | Wireframe box of the printable cell envelope (always) | yes |
+| `3DP::Print Position` | RGB axis cross at world origin (always) | yes |
 | `3DP::Clay Model` | Mesh-bead visualization (any mode, Preview Clay Model button) | yes |
 | `3DP::Heatmap` | Vertex-colored input mesh (Analyze) | yes |
 
-In Layer + Bracing mode, picking **Yes** for the "flip inward direction"
-prompt swaps which underlying curve lands on the `Outer Toolpath` vs.
-`Inner Toolpath` layer so the names always match what's geometrically
-outer vs. inner.
+In Layer + Bracing mode, the **Outer Toolpath** layer always carries
+the slice contour (the geometrically outer wall) regardless of flip
+direction. The "Flip inward direction" prompt swaps which side the
+bracing rib extends to (inward by default, outward when flipped); the
+inward-projected curve itself is computed as the bracing's anchor but
+is neither baked nor printed.
 
 ## Prerequisites
 
@@ -260,18 +293,31 @@ Rhino via `_PlugInManager → Install…`.
 2. Click **Settings** to configure:
    - **Clay material**: preset (Porcelain / Stoneware / Earthenware) or
      custom bead diameter, max overhang, bond ratio, density.
-   - **Spiral toolpath**: layer height, frames per layer, direction, etc.
-   - **Robot / printer**: feed rate (mm/s), travel speed, spindle S value,
-     nozzle tool (T10/T11/T12), RoboDK paths.
-3. Click **1. Spiral Slice** — pick a Brep/Mesh in Rhino. The plugin
-   generates the spiral toolpath on `3DP::Contours`, `3DP::Spiral Toolpath`
-   and `3DP::Ribbon` layers.
+   - **Toolpath**: Spiral Slice (vase mode) or Layer Slice; Outer Wall
+     Bracing (Layer mode only, ruled-geometry only); Spiral follows
+     curve normal (Spiral mode only); layer height; frames per layer;
+     start angle; CCW/CW direction.
+   - **Robot / printer**: feed rate (mm/s), travel speed, spindle S
+     value, nozzle tool (T10/T11/T12), RoboDK paths.
+   - **Build Volume (mm)**: X min/max, Y min/max, Z height of the cell
+     envelope (defaults match CCL-ALTAR-01).
+   - `Import…` / `Export…` round-trip the whole config to a JSON file.
+3. Click **1. Slice** — pick a Brep/Mesh in Rhino. The plugin moves
+   the picked geometry to origin (undoable with `Ctrl+Z`), then
+   produces:
+   - The toolpath layer (spiral or per-layer outer / bracing).
+   - The skirt on `3DP::Skirt` (always, 15 mm outward of lowest
+     contour).
+   - The build-volume box on `3DP::Build Volume`.
+   - The Print Position RGB cross on `3DP::Print Position`.
 4. Click **2. Analyze** — choose the heatmap channel (Clay, Robot, Both).
    The geometry mesh is recolored on `3DP::Heatmap`.
-5. Click **3. Send to RoboDK** — opens RoboDK, loads the station template,
-   adds the curve under `BasePlate02`, links it to `3DP_Template`,
-   regenerates the program. All speeds, spindle, and reference frame come
-   from the plugin settings.
+5. Click **3. Send to RoboDK** — opens RoboDK, loads the station
+   template, adds the curve (skirt + part as one continuous path)
+   under `BasePlate02`, binds it to `3DP_Template`, regenerates the
+   program. All speeds, spindle, and reference frame come from the
+   plugin settings. RoboDK only opens / re-sends when this button (or
+   *Run All*) is clicked — never automatically.
 
 ## RoboDK station expectations
 
