@@ -142,6 +142,8 @@ namespace CCL_Clay3DP.UI
             "3DP::Bracing Vectors",
             "3DP::Clay Model",
             "3DP::Print Position",
+            "3DP::Skirt",
+            "3DP::Build Volume",
         };
 
         private void OnSettingsClick(object sender, EventArgs e)
@@ -364,7 +366,10 @@ namespace CCL_Clay3DP.UI
                 selection, out translationDistance);
             var printingSelection = ApplyTransform(selection, translation);
             if (doc != null)
+            {
                 BakePrintPositionMarker(doc, printingSelection);
+                BakeBuildVolume(doc, _settings.BuildVolume);
+            }
             string translationMsg = translationDistance < 0.001
                 ? "Geometry already at origin"
                 : $"Geometry translated {translationDistance:F1} mm to " +
@@ -476,6 +481,12 @@ namespace CCL_Clay3DP.UI
 
                 // 8) Bake to document
                 BakeResults(_lastResult);
+
+                // 9) Skirt — always produced from the lowest contour, 15 mm
+                // outward (Issue #8). First path the robot prints; primes
+                // the extruder before the part starts.
+                var skirt = SkirtBuilder.BuildSkirt(contours[0]);
+                BakeSkirt(RhinoDoc.ActiveDoc, skirt);
 
                 Rhino.UI.StatusBar.UpdateProgressMeter(100, true);
                 Rhino.UI.StatusBar.HideProgressMeter();
@@ -625,10 +636,11 @@ namespace CCL_Clay3DP.UI
             return result;
         }
 
-        // Bake a visual marker showing where the print will physically land:
-        // 12 line edges around the (translated) bbox in gray, plus a small
-        // RGB axis cross at the world origin. Single dedicated layer
-        // "3DP::Print Position", visible by default.
+        // Bake a small RGB axis cross at the world origin so the user
+        // can see where the print will physically land. Single dedicated
+        // layer "3DP::Print Position", visible by default. The earlier
+        // bounding-box wireframe was removed (too much visual clutter for
+        // not enough information).
         private static void BakePrintPositionMarker(
             RhinoDoc doc, GeometrySelection sel)
         {
@@ -644,29 +656,9 @@ namespace CCL_Clay3DP.UI
             if (layerIdx < doc.Layers.Count)
                 doc.Layers[layerIdx].IsVisible = true;
 
-            var corners = bbox.GetCorners();
-            // Box corners returned by Rhino:
-            //   0 min,min,min   1 max,min,min   2 max,max,min   3 min,max,min
-            //   4 min,min,max   5 max,min,max   6 max,max,max   7 min,max,max
-            int[,] edges = new int[,]
-            {
-                { 0, 1 }, { 1, 2 }, { 2, 3 }, { 3, 0 }, // bottom
-                { 4, 5 }, { 5, 6 }, { 6, 7 }, { 7, 4 }, // top
-                { 0, 4 }, { 1, 5 }, { 2, 6 }, { 3, 7 }, // verticals
-            };
-            var bboxAttrs = new ObjectAttributes
-            {
-                LayerIndex = layerIdx,
-                Name = "PrintPositionBBox",
-            };
-            for (int i = 0; i < edges.GetLength(0); i++)
-            {
-                var line = new LineCurve(corners[edges[i, 0]], corners[edges[i, 1]]);
-                if (line.IsValid) doc.Objects.AddCurve(line, bboxAttrs);
-            }
-
-            // RGB axis cross. Length scales with bbox so it stays visible on
-            // both small and large prints, with a 20mm floor.
+            // RGB axis cross. Length scales with the part bbox so it
+            // stays visible on both small and large prints, with a 20mm
+            // floor.
             double diag = bbox.Diagonal.Length;
             double axisLen = Math.Max(20.0, diag * 0.1);
             var origin = Point3d.Origin;
@@ -696,6 +688,79 @@ namespace CCL_Clay3DP.UI
                 if (line.IsValid) doc.Objects.AddCurve(line, attrs);
             }
 
+            doc.Views.Redraw();
+        }
+
+        // Bake a wireframe box showing the cell's printable space:
+        // 12 edges from (XMin, YMin, 0) to (XMax, YMax, Height). The
+        // box always sits on the build plate (Z starts at 0). Bounds
+        // come from PipelineSettings.BuildVolume so the user can adjust
+        // them in Settings if they have a different cell.
+        private static void BakeBuildVolume(
+            RhinoDoc doc, BuildVolumeSettings bv)
+        {
+            if (doc == null || bv == null) return;
+            // Validate ranges — silently skip on degenerate input rather
+            // than throw mid-slice.
+            if (bv.XMin >= bv.XMax) return;
+            if (bv.YMin >= bv.YMax) return;
+            if (bv.Height <= 0) return;
+
+            int layerIdx = EnsureLayer(
+                doc, "3DP::Build Volume", System.Drawing.Color.DarkCyan);
+            if (layerIdx < 0) return;
+            if (layerIdx < doc.Layers.Count)
+                doc.Layers[layerIdx].IsVisible = true;
+
+            var c = new Point3d[8]
+            {
+                new Point3d(bv.XMin, bv.YMin, 0.0),       // 0
+                new Point3d(bv.XMax, bv.YMin, 0.0),       // 1
+                new Point3d(bv.XMax, bv.YMax, 0.0),       // 2
+                new Point3d(bv.XMin, bv.YMax, 0.0),       // 3
+                new Point3d(bv.XMin, bv.YMin, bv.Height), // 4
+                new Point3d(bv.XMax, bv.YMin, bv.Height), // 5
+                new Point3d(bv.XMax, bv.YMax, bv.Height), // 6
+                new Point3d(bv.XMin, bv.YMax, bv.Height), // 7
+            };
+            int[,] edges = new int[,]
+            {
+                { 0, 1 }, { 1, 2 }, { 2, 3 }, { 3, 0 }, // bottom rect
+                { 4, 5 }, { 5, 6 }, { 6, 7 }, { 7, 4 }, // top rect
+                { 0, 4 }, { 1, 5 }, { 2, 6 }, { 3, 7 }, // verticals
+            };
+            var attrs = new ObjectAttributes
+            {
+                LayerIndex = layerIdx,
+                Name = "BuildVolumeEdge",
+            };
+            for (int i = 0; i < edges.GetLength(0); i++)
+            {
+                var line = new LineCurve(c[edges[i, 0]], c[edges[i, 1]]);
+                if (line.IsValid) doc.Objects.AddCurve(line, attrs);
+            }
+            doc.Views.Redraw();
+        }
+
+        // Bake the skirt curve on its own layer so the user can verify
+        // the offset before sending to the robot. The skirt is always
+        // produced from the lowest contour (15 mm outward, fixed) and
+        // is the first path the robot follows.
+        private static void BakeSkirt(RhinoDoc doc, Curve skirt)
+        {
+            if (doc == null || skirt == null) return;
+            int layerIdx = EnsureLayer(
+                doc, "3DP::Skirt", System.Drawing.Color.Blue);
+            if (layerIdx < 0) return;
+            if (layerIdx < doc.Layers.Count)
+                doc.Layers[layerIdx].IsVisible = true;
+
+            var attrs = new ObjectAttributes
+            {
+                LayerIndex = layerIdx,
+                Name = "Skirt",
+            };
+            doc.Objects.AddCurve(skirt, attrs);
             doc.Views.Redraw();
         }
 
@@ -938,6 +1003,10 @@ namespace CCL_Clay3DP.UI
                     // Simple layer slice — just the outer contours.
                     BakeLayerContours(contours);
 
+                    // Skirt from the lowest contour (Issue #8).
+                    var skirtNoBrace = SkirtBuilder.BuildSkirt(contours[0]);
+                    BakeSkirt(RhinoDoc.ActiveDoc, skirtNoBrace);
+
                     // Cache for Analyze: sample outer contours + build +Z-up
                     // frames so Clay / Robot / Both all work in this mode.
                     var pts = new List<Point3d>();
@@ -1053,6 +1122,12 @@ namespace CCL_Clay3DP.UI
                     Contours = goodContours,
                     LayerCount = goodContours.Count,
                 };
+
+                // Skirt from the absolute lowest contour, NOT goodContours[0]
+                // — the skirt is independent of which layers passed the
+                // bracing filter (Issue #8).
+                var skirtBraced = SkirtBuilder.BuildSkirt(contours[0]);
+                BakeSkirt(RhinoDoc.ActiveDoc, skirtBraced);
 
                 SetStatus(WithTranslationNote(
                     $"Layer slice + bracing complete: {results.Count} layers" +

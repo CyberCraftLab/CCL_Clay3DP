@@ -35,6 +35,23 @@ namespace CCL_Clay3DP.Models
         public double HeightOffsetTop { get; set; } = 0.0;
     }
 
+    // Cell-specific build volume — the printable space the robot can
+    // physically reach with the extruder. Used to render a wireframe
+    // box at slice time so users can see whether their part fits, and
+    // to center new geometry on the build plate (Issue #1 origin
+    // translation puts bbox bottom-center at world origin, which is
+    // also (XMin+XMax)/2, (YMin+YMax)/2 of this volume when symmetric).
+    //
+    // Z always starts at 0 (build plate). Height = upper Z extent.
+    public class BuildVolumeSettings
+    {
+        public double XMin { get; set; } = -200.0;
+        public double XMax { get; set; } =  200.0;
+        public double YMin { get; set; } = -200.0;
+        public double YMax { get; set; } =  200.0;
+        public double Height { get; set; } = 1000.0;
+    }
+
     public class HelixParameters
     {
         public double LayerHeight { get; set; } = 4.0;

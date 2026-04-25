@@ -53,6 +53,15 @@ namespace CCL_Clay3DP.Settings
         private TextBox _stationTemplatePath;
         private TextBox _projectName;
 
+        // Build Volume fields (Issue #8 follow-up). Z always starts at 0
+        // (build plate); only the X/Y bounds and the upper Z height are
+        // user-settable.
+        private NumericStepper _buildVolumeXMin;
+        private NumericStepper _buildVolumeXMax;
+        private NumericStepper _buildVolumeYMin;
+        private NumericStepper _buildVolumeYMax;
+        private NumericStepper _buildVolumeHeight;
+
         // Set to true while we programmatically toggle the
         // _spiralFollowsCurveNormalCheck checkbox (LoadValues, mode-switch
         // force-uncheck, or post-warning revert) so the user-facing warning
@@ -169,6 +178,33 @@ namespace CCL_Clay3DP.Settings
             var browseStation = new Button { Text = "..." };
             browseStation.Click += (s, e) => BrowseFile(_stationTemplatePath, "RoboDK Station", "*.rdk");
 
+            // --- Build Volume ---
+            // Wide ranges so any reasonable robot cell fits. The wireframe
+            // box bakes onto layer "3DP::Build Volume" at slice time.
+            _buildVolumeXMin = CreateStepper(-5000.0, 0.0, 10.0, 0);
+            _buildVolumeXMax = CreateStepper(0.0, 5000.0, 10.0, 0);
+            _buildVolumeYMin = CreateStepper(-5000.0, 0.0, 10.0, 0);
+            _buildVolumeYMax = CreateStepper(0.0, 5000.0, 10.0, 0);
+            _buildVolumeHeight = CreateStepper(1.0, 5000.0, 10.0, 0);
+
+            var buildVolumeGroup = new GroupBox
+            {
+                Text = "Build Volume (mm)",
+                Content = new TableLayout
+                {
+                    Spacing = new Size(8, 4),
+                    Padding = new Padding(8),
+                    Rows =
+                    {
+                        LabeledRow("X min", _buildVolumeXMin),
+                        LabeledRow("X max", _buildVolumeXMax),
+                        LabeledRow("Y min", _buildVolumeYMin),
+                        LabeledRow("Y max", _buildVolumeYMax),
+                        LabeledRow("Z height (Z min always 0)", _buildVolumeHeight),
+                    },
+                },
+            };
+
             var robotGroup = new GroupBox
             {
                 Text = "Robot / Printer",
@@ -230,6 +266,7 @@ namespace CCL_Clay3DP.Settings
                         new TableRow(clayGroup),
                         new TableRow(spiralGroup),
                         new TableRow(robotGroup),
+                        new TableRow(buildVolumeGroup),
                         null, // soak any extra vertical space inside the scroller
                     },
                 },
@@ -293,6 +330,13 @@ namespace CCL_Clay3DP.Settings
             _stationTemplatePath.Text = _settings.Robot.RoboDKStationTemplatePath;
             _projectName.Text = _settings.Robot.RoboDKProjectName;
 
+            // Build Volume
+            _buildVolumeXMin.Value = _settings.BuildVolume.XMin;
+            _buildVolumeXMax.Value = _settings.BuildVolume.XMax;
+            _buildVolumeYMin.Value = _settings.BuildVolume.YMin;
+            _buildVolumeYMax.Value = _settings.BuildVolume.YMax;
+            _buildVolumeHeight.Value = _settings.BuildVolume.Height;
+
             UpdateTiltFieldsEnabled();
             UpdateToolpathFieldsEnabled();
         }
@@ -336,6 +380,13 @@ namespace CCL_Clay3DP.Settings
             _settings.Robot.RoboDKExecutablePath = _roboDKExePath.Text;
             _settings.Robot.RoboDKStationTemplatePath = _stationTemplatePath.Text;
             _settings.Robot.RoboDKProjectName = _projectName.Text;
+
+            // Build Volume
+            _settings.BuildVolume.XMin = _buildVolumeXMin.Value;
+            _settings.BuildVolume.XMax = _buildVolumeXMax.Value;
+            _settings.BuildVolume.YMin = _buildVolumeYMin.Value;
+            _settings.BuildVolume.YMax = _buildVolumeYMax.Value;
+            _settings.BuildVolume.Height = _buildVolumeHeight.Value;
         }
 
         private void OnPresetChanged(object sender, EventArgs e)
@@ -569,6 +620,8 @@ namespace CCL_Clay3DP.Settings
             _settings.Height = loaded.Height;
             _settings.Helix = loaded.Helix;
             _settings.Robot = loaded.Robot;
+            if (loaded.BuildVolume != null)
+                _settings.BuildVolume = loaded.BuildVolume;
             LoadValues();
         }
     }
