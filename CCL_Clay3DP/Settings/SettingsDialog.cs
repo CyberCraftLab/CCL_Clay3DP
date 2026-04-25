@@ -118,33 +118,18 @@ namespace CCL_Clay3DP.Settings
                 },
             };
 
-            // --- Base (Issue #10) ---
-            // Sits between Clay and Toolpath because the base is a
-            // material-driven feature (line spacing follows bead diameter)
-            // and conceptually precedes the part toolpath. Infill pattern
-            // and line spacing are hardcoded — see BaseSettings.
+            // --- Toolpath ---
+            // Base controls (Issue #10) are folded into the Toolpath group
+            // so the dialog stays compact on a high-res laptop screen — the
+            // base is part of the toolpath conceptually (it's the first
+            // thing the robot prints). Infill pattern and line spacing are
+            // hardcoded; see BaseSettings.
             _enableBaseCheck = new CheckBox { Text = "Enable base (multi-layer raft)" };
             _enableBaseCheck.CheckedChanged += (s, e) => UpdateBaseFieldsEnabled();
 
             // 2..10 layers per spec; integer (DecimalPlaces=0).
             _baseLayerCount = CreateStepper(2, 10, 1, 0);
 
-            var baseGroup = new GroupBox
-            {
-                Text = "Base",
-                Content = new TableLayout
-                {
-                    Spacing = new Size(8, 4),
-                    Padding = new Padding(8),
-                    Rows =
-                    {
-                        new TableRow(null, _enableBaseCheck),
-                        LabeledRow("Base layer count (2-10)", _baseLayerCount),
-                    },
-                },
-            };
-
-            // --- Toolpath ---
             _spiralSliceCheck = new CheckBox { Text = "Spiral Slice (off = Layer Slice)" };
             _spiralSliceCheck.CheckedChanged += (s, e) => UpdateToolpathFieldsEnabled();
             _outerWallBracingCheck = new CheckBox
@@ -175,6 +160,8 @@ namespace CCL_Clay3DP.Settings
                     Padding = new Padding(8),
                     Rows =
                     {
+                        new TableRow(null, _enableBaseCheck),
+                        LabeledRow("Base layer count (2-10)", _baseLayerCount),
                         new TableRow(null, _spiralSliceCheck),
                         new TableRow(null, _outerWallBracingCheck),
                         new TableRow(null, _spiralFollowsCurveNormalCheck),
@@ -298,7 +285,6 @@ namespace CCL_Clay3DP.Settings
                     Rows =
                     {
                         new TableRow(clayGroup),
-                        new TableRow(baseGroup),
                         new TableRow(spiralGroup),
                         new TableRow(robotGroup),
                         new TableRow(buildVolumeGroup),
