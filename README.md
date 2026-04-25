@@ -82,6 +82,8 @@ always reflects only the current mode.
 ├─ CCL_Clay3DP/               C# Rhino 8 plugin source (the main product)
 ├─ PostProcessor/             KUKA CNC ISG post processor (copy into RoboDK)
 ├─ robodk_station/            RoboDK station template (3DP_v0.4.rdk)
+│                                + bundled RoboDK app config (settings.ini,
+│                                layout6.0.1.ini) for matching the CCL UI
 ├─ 3DP.sln                    Visual Studio solution
 ├─ LICENSE                    Apache License 2.0
 ├─ NOTICE                     Third-party attributions
@@ -201,6 +203,46 @@ during normal operation.
 The bundled post is a modification of RoboDK Inc.'s original KUKA
 CNC 2.1 ISG Kernel post (Apache-2.0). CCL modifications are listed
 in the file header and in [NOTICE](NOTICE).
+
+## RoboDK app config (recommended for the same UI as CCL)
+
+For the most consistent experience, the repository ships RoboDK's
+own UI configuration files alongside the station so you get the same
+view, panel layout, and view-on-load behavior we use at the CCL lab.
+
+The relevant files live at:
+
+```
+robodk_station/settings.ini          general RoboDK preferences
+                                     (incl. AUTO_FIT_NEW=false so the
+                                     view saved in the station is the
+                                     view you get on every reopen)
+robodk_station/layout6.0.1.ini       window / dock panel layout for
+                                     RoboDK 6.0.x
+```
+
+**To install:**
+
+1. **Close RoboDK fully.** RoboDK rewrites these files on exit, so a
+   running instance will clobber whatever you copy in.
+2. Copy both files into your RoboDK config directory:
+
+   ```
+   %APPDATA%\RoboDK\
+   ```
+
+   (typically `C:\Users\<you>\AppData\Roaming\RoboDK\`).
+3. Reopen RoboDK and load `robodk_station/3DP_v0.4.rdk`. You should
+   see the same docked panels and saved camera framing we use.
+
+The layout file is RoboDK-version-specific (`layout6.0.1.ini` →
+RoboDK 6.0.x). On a different RoboDK version the file is ignored
+harmlessly — no risk to your install — but you won't get the panel
+layout match. Update from a current CCL machine if you need the
+layout for a newer RoboDK build.
+
+These files are optional. The plugin works without them; copying
+them in just gives you the same UX we have at CCL.
 
 ## Building
 
