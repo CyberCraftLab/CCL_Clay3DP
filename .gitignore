@@ -11,3 +11,4 @@ obj/
 .claude/
 G-Code_Proofing/
 Calibration_Videos
+dist/
