@@ -24,11 +24,12 @@ namespace CCL_Clay3DP.Settings
     {
         private readonly PipelineSettings _settings;
 
-        // Clay fields
+        // Clay fields. MinLayerBondRatio is no longer exposed in the
+        // dialog (Issue #16) but the model field stays — the printability
+        // analyzer still reads it. Presets supply per-clay defaults.
         private DropDown _presetDropDown;
         private NumericStepper _beadDiameter;
         private NumericStepper _maxOverhang;
-        private NumericStepper _minBondRatio;
         private NumericStepper _materialDensity;
 
         // Base fields (Issue #10) — multi-layer skirt + contour + 45-deg
@@ -39,21 +40,21 @@ namespace CCL_Clay3DP.Settings
         private CheckBox _enableBaseCheck;
         private NumericStepper _baseLayerCount;
 
-        // Toolpath fields
+        // Toolpath fields. RadialOffset and StartAngle were removed from
+        // the dialog in Issue #16. RadialOffset was dead config and is
+        // gone from the model too; StartAngle is still consumed by the
+        // spiral interpolator and stays in the model with default 0.
         private CheckBox _spiralSliceCheck;
         private CheckBox _outerWallBracingCheck;
         private CheckBox _spiralFollowsCurveNormalCheck;
         private NumericStepper _layerHeight;
-        private NumericStepper _radialOffset;
-        private NumericStepper _startAngle;
         private DropDown _directionDropDown;
         private NumericStepper _framesPerLayer;
 
-        // Robot fields
+        // Robot fields. Tilt mode / LeadAngle / VerticalBias were dead
+        // config (no pipeline ever read them) — removed from both the
+        // dialog and the model in Issue #16.
         private NumericStepper _feedRate;
-        private DropDown _tiltModeDropDown;
-        private NumericStepper _leadAngle;
-        private NumericStepper _verticalBias;
         private NumericStepper _maxWristAngularVel;
         private NumericStepper _spindleSpeed;
         private DropDown _nozzleTool;
@@ -97,7 +98,6 @@ namespace CCL_Clay3DP.Settings
 
             _beadDiameter = CreateStepper(0.5, 20.0, 0.5, 1);
             _maxOverhang = CreateStepper(1.0, 60.0, 1.0, 1);
-            _minBondRatio = CreateStepper(0.1, 1.0, 0.05, 2);
             _materialDensity = CreateStepper(0.5, 5.0, 0.1, 1);
 
             var clayGroup = new GroupBox
@@ -109,11 +109,20 @@ namespace CCL_Clay3DP.Settings
                     Padding = new Padding(8),
                     Rows =
                     {
-                        LabeledRow("Preset", _presetDropDown),
-                        LabeledRow("Bead diameter (mm)", _beadDiameter),
-                        LabeledRow("Max overhang angle (deg)", _maxOverhang),
-                        LabeledRow("Min layer bond ratio", _minBondRatio),
-                        LabeledRow("Material density (g/cm3)", _materialDensity),
+                        LabeledRow("Preset", _presetDropDown,
+                            "Pre-defined clay parameter sets. Selecting a preset overwrites " +
+                            "bead diameter, max overhang, and material density. \"Custom\" " +
+                            "keeps your own values."),
+                        LabeledRow("Bead diameter (mm)", _beadDiameter,
+                            "Diameter of the extruded clay bead. Drives base infill line " +
+                            "spacing (1.5x) and the bead-thickness assumption used by the " +
+                            "printability analyzer."),
+                        LabeledRow("Max overhang angle (deg)", _maxOverhang,
+                            "Maximum surface tilt the wet clay will hold without sagging. " +
+                            "Used by the printability analyzer to flag risky regions."),
+                        LabeledRow("Material density (g/cm3)", _materialDensity,
+                            "Mass per unit volume of the clay mix. Used to estimate part " +
+                            "weight in the analyzer."),
                     },
                 },
             };
@@ -125,27 +134,42 @@ namespace CCL_Clay3DP.Settings
             // thing the robot prints). Infill pattern and line spacing are
             // hardcoded; see BaseSettings.
             _enableBaseCheck = new CheckBox { Text = "Enable base (multi-layer raft)" };
+            _enableBaseCheck.ToolTip =
+                "Print a multi-layer raft (skirt + N x contour + alternating " +
+                "+/-45 deg crosshatch infill) under the part. Recommended for " +
+                "closed-loop / vase parts with a hollow bottom.";
             _enableBaseCheck.CheckedChanged += (s, e) => UpdateBaseFieldsEnabled();
 
             // 2..10 layers per spec; integer (DecimalPlaces=0).
             _baseLayerCount = CreateStepper(2, 10, 1, 0);
 
             _spiralSliceCheck = new CheckBox { Text = "Spiral Slice (off = Layer Slice)" };
+            _spiralSliceCheck.ToolTip =
+                "ON: one continuous spiral from bottom to top (vase mode - " +
+                "single-wall parts). OFF: discrete planar layers, each printed " +
+                "as a closed loop.";
             _spiralSliceCheck.CheckedChanged += (s, e) => UpdateToolpathFieldsEnabled();
             _outerWallBracingCheck = new CheckBox
             {
-                Text = "Outer Wall Bracing (Layer Slice only)"
+                Text = "Outer Wall Bracing (Layer Slice only)",
+                ToolTip =
+                    "Layer Slice only. Adds a zigzag bracing pattern attached to " +
+                    "the outer wall, anchored to a virtual inner offset. Improves " +
+                    "rigidity of layered prints.",
             };
             _spiralFollowsCurveNormalCheck = new CheckBox
             {
-                Text = "Spiral follows curve normal (Spiral Slice only)"
+                Text = "Spiral follows curve normal (Spiral Slice only)",
+                ToolTip =
+                    "Spiral Slice only. Tilts the build plate so the tool aligns " +
+                    "with the surface normal. WARNING: can drive the robot into " +
+                    "joint limits, singularities, or self-collision - always " +
+                    "review in RoboDK before sending.",
             };
             _spiralFollowsCurveNormalCheck.CheckedChanged +=
                 OnSpiralFollowsCurveNormalChanged;
 
             _layerHeight = CreateStepper(0.1, 50.0, 0.5, 1);
-            _radialOffset = CreateStepper(-100.0, 100.0, 0.5, 1);
-            _startAngle = CreateStepper(0.0, 360.0, 5.0, 0);
             _directionDropDown = new DropDown();
             _directionDropDown.Items.Add("CCW");
             _directionDropDown.Items.Add("CW");
@@ -161,28 +185,27 @@ namespace CCL_Clay3DP.Settings
                     Rows =
                     {
                         new TableRow(null, _enableBaseCheck),
-                        LabeledRow("Base layer count (2-10)", _baseLayerCount),
+                        LabeledRow("Base layer count (2-10)", _baseLayerCount,
+                            "How many raft layers to print before the part body. " +
+                            "Default 3 - more = stronger adhesion but more material and time."),
                         new TableRow(null, _spiralSliceCheck),
                         new TableRow(null, _outerWallBracingCheck),
                         new TableRow(null, _spiralFollowsCurveNormalCheck),
-                        LabeledRow("Layer height (mm)", _layerHeight),
-                        LabeledRow("Radial offset (mm)", _radialOffset),
-                        LabeledRow("Start angle (deg)", _startAngle),
-                        LabeledRow("Direction", _directionDropDown),
-                        LabeledRow("Frames per layer", _framesPerLayer),
+                        LabeledRow("Layer height (mm)", _layerHeight,
+                            "Vertical distance between layers. For clay, typically " +
+                            "0.5x-1.0x the bead diameter."),
+                        LabeledRow("Direction", _directionDropDown,
+                            "CCW: counter-clockwise spiral / contour winding. CW: clockwise."),
+                        LabeledRow("Frames per layer", _framesPerLayer,
+                            "Number of robot frames sampled per closed loop. Higher = " +
+                            "smoother motion at the cost of larger G-code files and " +
+                            "longer slice time. KUKA CNC has no per-program frame limit."),
                     },
                 },
             };
 
             // --- Robot / Printer ---
             _feedRate = CreateStepper(1.0, 500.0, 10.0, 1);
-            _tiltModeDropDown = new DropDown();
-            _tiltModeDropDown.Items.Add("Normal");
-            _tiltModeDropDown.Items.Add("Lead-Lag");
-            _tiltModeDropDown.Items.Add("Vertical Bias");
-            _tiltModeDropDown.SelectedValueChanged += OnTiltModeChanged;
-            _leadAngle = CreateStepper(-45.0, 45.0, 1.0, 1);
-            _verticalBias = CreateStepper(0.0, 1.0, 0.05, 2);
             _maxWristAngularVel = CreateStepper(1.0, 360.0, 5.0, 0);
             _spindleSpeed = CreateStepper(0, 9999, 50, 0);
             _nozzleTool = new DropDown();
@@ -217,11 +240,18 @@ namespace CCL_Clay3DP.Settings
                     Padding = new Padding(8),
                     Rows =
                     {
-                        LabeledRow("X min", _buildVolumeXMin),
-                        LabeledRow("X max", _buildVolumeXMax),
-                        LabeledRow("Y min", _buildVolumeYMin),
-                        LabeledRow("Y max", _buildVolumeYMax),
-                        LabeledRow("Z height (Z min always 0)", _buildVolumeHeight),
+                        LabeledRow("X min", _buildVolumeXMin,
+                            "Minimum X coordinate of the printable workspace, in mm " +
+                            "(relative to world origin = build plate center)."),
+                        LabeledRow("X max", _buildVolumeXMax,
+                            "Maximum X coordinate of the printable workspace, in mm."),
+                        LabeledRow("Y min", _buildVolumeYMin,
+                            "Minimum Y coordinate of the printable workspace, in mm."),
+                        LabeledRow("Y max", _buildVolumeYMax,
+                            "Maximum Y coordinate of the printable workspace, in mm."),
+                        LabeledRow("Z height (Z min always 0)", _buildVolumeHeight,
+                            "Maximum Z height of the printable workspace, in mm. Z always " +
+                            "starts at 0 (build plate)."),
                     },
                 },
             };
@@ -235,16 +265,31 @@ namespace CCL_Clay3DP.Settings
                     Padding = new Padding(8),
                     Rows =
                     {
-                        LabeledRow("Feed rate (mm/s)", _feedRate),
-                        LabeledRow("Tilt mode", _tiltModeDropDown),
-                        LabeledRow("Lead angle (deg)", _leadAngle),
-                        LabeledRow("Vertical bias (0-1)", _verticalBias),
-                        LabeledRow("Max wrist vel. (deg/s)", _maxWristAngularVel),
-                        LabeledRow("Spindle speed (S value)", _spindleSpeed),
-                        LabeledRow("Nozzle tool", _nozzleTool),
-                        BrowseRow("RoboDK executable", _roboDKExePath, browseDKExe),
-                        BrowseRow("Station template", _stationTemplatePath, browseStation),
-                        LabeledRow("Project name", _projectName),
+                        LabeledRow("Feed rate (mm/s)", _feedRate,
+                            "Robot tool-tip travel speed during printing. Typical range " +
+                            "30-60 mm/s for clay; coordinate with the extruder calibration " +
+                            "(1-3 rotations/sec sweet spot)."),
+                        LabeledRow("Max wrist vel. (deg/s)", _maxWristAngularVel,
+                            "Hard cap on wrist angular velocity. Frames whose orientation " +
+                            "change would exceed this cap trigger warnings - match to your " +
+                            "KUKA model's joint limits."),
+                        LabeledRow("Spindle speed (S value)", _spindleSpeed,
+                            "Raw S-value passed to the extruder driver. Cell-specific: per " +
+                            "CCL-ALTAR-01 calibration, RPM = 0.386*S + 14.94 for S >= 50; " +
+                            "sweet spot S = 116-428 (1-3 rot/s). Front-panel ratio pot " +
+                            "must be at 1."),
+                        LabeledRow("Nozzle tool", _nozzleTool,
+                            "RoboDK tool number - selects which calibrated tool offset to " +
+                            "use. T10/T11/T12 must match what's defined in your station template."),
+                        BrowseRow("RoboDK executable", _roboDKExePath, browseDKExe,
+                            "Full path to RoboDK.exe. Use the Browse button if unsure."),
+                        BrowseRow("Station template", _stationTemplatePath, browseStation,
+                            "Path to the .rdk station file used as the starting point for " +
+                            "each slice. Should contain your robot, build plate, and tool " +
+                            "calibrations."),
+                        LabeledRow("Project name", _projectName,
+                            "Name used for the spawned RoboDK project - also affects output " +
+                            "file naming."),
                     },
                 },
             };
@@ -261,9 +306,17 @@ namespace CCL_Clay3DP.Settings
             cancelButton.Click += (s, e) => Close(false);
 
             var importButton = new Button { Text = "Import..." };
+            importButton.ToolTip =
+                "Load a previously-saved settings JSON file into the dialog. " +
+                "Imported values are pending - they don't persist until you " +
+                "click OK.";
             importButton.Click += OnImportClick;
 
             var exportButton = new Button { Text = "Export..." };
+            exportButton.ToolTip =
+                "Save the current dialog values to a JSON file for backup or " +
+                "sharing. Does not modify the saved global settings - click OK " +
+                "afterwards if you want the values persisted in the plugin too.";
             exportButton.Click += OnExportClick;
 
             DefaultButton = okButton;
@@ -308,8 +361,62 @@ namespace CCL_Clay3DP.Settings
                 Padding = new Padding(12),
                 Rows =
                 {
+                    new TableRow(BuildHeader()),
                     new TableRow(new TableCell(scrollableContent, true)) { ScaleHeight = true },
                     new TableRow(buttonRow),
+                },
+            };
+        }
+
+        /// <summary>
+        /// Header band shown above the settings groups: CC logo (40 px) +
+        /// "CyberCraft Lab 3DP Interface" title in normal weight,
+        /// left-aligned. The logo PNG is the same embedded resource used
+        /// by the title-bar icon (see PluginIcon), loaded straight into
+        /// an Eto Bitmap so the file is read once per dialog open.
+        /// </summary>
+        private static Control BuildHeader()
+        {
+            const int LogoSize = 40;
+            Eto.Drawing.Image logoImage = null;
+            try
+            {
+                var asm = typeof(SettingsDialog).Assembly;
+                using (var stream = asm.GetManifestResourceStream("CCL_Clay3DP.CCLogo.png"))
+                {
+                    if (stream != null)
+                        logoImage = new Bitmap(stream);
+                }
+            }
+            catch
+            {
+                // Header degrades to title-only if the embedded resource
+                // can't be read — a built plugin should never hit this.
+            }
+
+            var logoView = new ImageView
+            {
+                Image = logoImage,
+                Size = new Size(LogoSize, LogoSize),
+            };
+
+            var titleLabel = new Label
+            {
+                Text = "CyberCraft Lab 3DP Interface",
+                Font = new Font(SystemFont.Default, 14),
+                VerticalAlignment = VerticalAlignment.Center,
+            };
+
+            // Logo + title side-by-side, left-aligned. The trailing null
+            // cell soaks any extra horizontal space so the pair doesn't
+            // stretch with the dialog width.
+            return new TableLayout
+            {
+                Spacing = new Size(10, 0),
+                Padding = new Padding(0, 0, 0, 4),
+                Rows =
+                {
+                    new TableRow(logoView, titleLabel, null),
                 },
             };
         }
@@ -321,7 +428,6 @@ namespace CCL_Clay3DP.Settings
             _presetDropDown.SelectedIndex = presetIndex >= 0 ? presetIndex : 3; // Custom
             _beadDiameter.Value = _settings.Clay.BeadDiameter;
             _maxOverhang.Value = _settings.Clay.MaxOverhangAngle;
-            _minBondRatio.Value = _settings.Clay.MinLayerBondRatio;
             _materialDensity.Value = _settings.Clay.MaterialDensity;
 
             // Base
@@ -342,16 +448,11 @@ namespace CCL_Clay3DP.Settings
             _spiralFollowsCurveNormalCheck.Checked = _settings.Helix.SpiralFollowsCurveNormal;
             _suppressSpiralNormalWarning = false;
             _layerHeight.Value = _settings.Helix.LayerHeight;
-            _radialOffset.Value = _settings.Helix.RadialOffset;
-            _startAngle.Value = _settings.Helix.StartAngle;
             _directionDropDown.SelectedIndex = _settings.Helix.DirectionCCW ? 0 : 1;
             _framesPerLayer.Value = _settings.Helix.FramesPerLayer;
 
             // Robot
             _feedRate.Value = _settings.Robot.FeedRate;
-            _tiltModeDropDown.SelectedIndex = (int)_settings.Robot.TiltMode;
-            _leadAngle.Value = _settings.Robot.LeadAngle;
-            _verticalBias.Value = _settings.Robot.VerticalBias;
             _maxWristAngularVel.Value = _settings.Robot.MaxWristAngularVelocity;
             _spindleSpeed.Value = _settings.Robot.SpindleSpeed;
             int nozzleIdx = 0;
@@ -369,7 +470,6 @@ namespace CCL_Clay3DP.Settings
             _buildVolumeYMax.Value = _settings.BuildVolume.YMax;
             _buildVolumeHeight.Value = _settings.BuildVolume.Height;
 
-            UpdateTiltFieldsEnabled();
             UpdateToolpathFieldsEnabled();
             UpdateBaseFieldsEnabled();
         }
@@ -389,7 +489,6 @@ namespace CCL_Clay3DP.Settings
             _settings.Clay.PresetName = _presetDropDown.SelectedValue?.ToString() ?? "Custom";
             _settings.Clay.BeadDiameter = _beadDiameter.Value;
             _settings.Clay.MaxOverhangAngle = _maxOverhang.Value;
-            _settings.Clay.MinLayerBondRatio = _minBondRatio.Value;
             _settings.Clay.MaterialDensity = _materialDensity.Value;
 
             // Base
@@ -401,16 +500,11 @@ namespace CCL_Clay3DP.Settings
             _settings.Helix.OuterWallBracing = _outerWallBracingCheck.Checked ?? false;
             _settings.Helix.SpiralFollowsCurveNormal = _spiralFollowsCurveNormalCheck.Checked ?? false;
             _settings.Helix.LayerHeight = _layerHeight.Value;
-            _settings.Helix.RadialOffset = _radialOffset.Value;
-            _settings.Helix.StartAngle = _startAngle.Value;
             _settings.Helix.DirectionCCW = _directionDropDown.SelectedIndex == 0;
             _settings.Helix.FramesPerLayer = (int)_framesPerLayer.Value;
 
             // Robot
             _settings.Robot.FeedRate = _feedRate.Value;
-            _settings.Robot.TiltMode = (TiltMode)_tiltModeDropDown.SelectedIndex;
-            _settings.Robot.LeadAngle = _leadAngle.Value;
-            _settings.Robot.VerticalBias = _verticalBias.Value;
             _settings.Robot.MaxWristAngularVelocity = _maxWristAngularVel.Value;
             _settings.Robot.SpindleSpeed = _spindleSpeed.Value;
             _settings.Robot.NozzleTool = _nozzleTool.SelectedValue?.ToString() ?? "T10";
@@ -435,20 +529,11 @@ namespace CCL_Clay3DP.Settings
             var preset = ClayPresets.Get(name);
             _beadDiameter.Value = preset.BeadDiameter;
             _maxOverhang.Value = preset.MaxOverhangAngle;
-            _minBondRatio.Value = preset.MinLayerBondRatio;
             _materialDensity.Value = preset.MaterialDensity;
-        }
-
-        private void OnTiltModeChanged(object sender, EventArgs e)
-        {
-            UpdateTiltFieldsEnabled();
-        }
-
-        private void UpdateTiltFieldsEnabled()
-        {
-            var mode = (TiltMode)_tiltModeDropDown.SelectedIndex;
-            _leadAngle.Enabled = mode == TiltMode.LeadLag;
-            _verticalBias.Enabled = mode == TiltMode.VerticalBias;
+            // Preset's MinLayerBondRatio still applied to the underlying
+            // settings via _settings.Clay (PrintabilityAnalyzer reads it),
+            // but no longer surfaced in the dialog — write straight in.
+            _settings.Clay.MinLayerBondRatio = preset.MinLayerBondRatio;
         }
 
         /// <summary>
@@ -463,15 +548,12 @@ namespace CCL_Clay3DP.Settings
 
         /// <summary>
         /// Gray out fields that only apply to one toolpath mode:
-        ///  - Radial offset, Start angle: spiral-only → disabled when Layer Slice
         ///  - Outer Wall Bracing: layer-slice only → disabled AND auto-unchecked when Spiral Slice
         ///  - Spiral follows curve normal: spiral-only → disabled AND auto-unchecked when Layer Slice
         /// </summary>
         private void UpdateToolpathFieldsEnabled()
         {
             bool spiral = _spiralSliceCheck.Checked ?? true;
-            _radialOffset.Enabled = spiral;
-            _startAngle.Enabled = spiral;
             _outerWallBracingCheck.Enabled = !spiral;
             _spiralFollowsCurveNormalCheck.Enabled = spiral;
             // Force-uncheck when a checkbox is inapplicable to the current
@@ -579,23 +661,46 @@ namespace CCL_Clay3DP.Settings
             };
         }
 
-        private static TableRow LabeledRow(string label, Control control)
+        // Optional tip parameter (Issue #16). When non-null, the tooltip
+        // is applied to BOTH the label and the control so hovering either
+        // surface shows the help text. Eto wraps long tips automatically.
+        private static TableRow LabeledRow(string label, Control control, string tip = null)
         {
-            return new TableRow(
-                new Label { Text = label, VerticalAlignment = VerticalAlignment.Center },
-                control);
+            var labelCtrl = new Label
+            {
+                Text = label,
+                VerticalAlignment = VerticalAlignment.Center,
+            };
+            if (tip != null)
+            {
+                labelCtrl.ToolTip = tip;
+                control.ToolTip = tip;
+            }
+            return new TableRow(labelCtrl, control);
         }
 
-        private static TableRow BrowseRow(string label, TextBox textBox, Button browseButton)
+        // Same tip parameter as LabeledRow — when non-null, sets the
+        // tooltip on the label, the textbox, and the Browse button so
+        // hovering any of the three shows the help.
+        private static TableRow BrowseRow(string label, TextBox textBox, Button browseButton, string tip = null)
         {
+            var labelCtrl = new Label
+            {
+                Text = label,
+                VerticalAlignment = VerticalAlignment.Center,
+            };
+            if (tip != null)
+            {
+                labelCtrl.ToolTip = tip;
+                textBox.ToolTip = tip;
+                browseButton.ToolTip = tip;
+            }
             var row = new TableLayout
             {
                 Spacing = new Size(4, 0),
                 Rows = { new TableRow(new TableCell(textBox, true), browseButton) },
             };
-            return new TableRow(
-                new Label { Text = label, VerticalAlignment = VerticalAlignment.Center },
-                row);
+            return new TableRow(labelCtrl, row);
         }
 
         private void BrowseFile(TextBox target, string filterName, string filterExt)

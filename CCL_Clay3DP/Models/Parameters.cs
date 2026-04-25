@@ -63,7 +63,11 @@ namespace CCL_Clay3DP.Models
     public class HelixParameters
     {
         public double LayerHeight { get; set; } = 4.0;
-        public double RadialOffset { get; set; } = 0.0;
+        // StartAngle is no longer exposed in the SettingsDialog (Issue #16
+        // — was struck through as unused) but the spiral interpolator still
+        // reads it, so the field stays here. Default 0 means "start the
+        // spiral at the contour's natural curve start"; that's been the
+        // de-facto behavior since the dialog never had a useful preset.
         public double StartAngle { get; set; } = 0.0;
         public bool DirectionCCW { get; set; } = true;
         public int FramesPerLayer { get; set; } = 360;
