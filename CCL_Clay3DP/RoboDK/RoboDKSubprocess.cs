@@ -154,7 +154,11 @@ spindle_speed = data.get('spindle_speed', 500.0)
 nozzle_tool = data.get('nozzle_tool', 'T10')   # T10 / T11 / T12
 layer_height = data.get('layer_height', 0.0)   # mm, for template name only
 
-print(f'Loaded {{len(points_6xn)}} points')
+# The C# side prepends the skirt's frames to the part's frames so this
+# single 'points' list carries skirt → part as one continuous curve
+# (Issue #8 step 2). One approach at start, one retract at end, single
+# linear move between skirt-end and part-start at operation speed.
+print(f'Loaded {{len(points_6xn)}} points (skirt + part combined)')
 print(f'  Operation speed: {{feed_rate}} mm/s')
 print(f'  Travel speed: {{travel_speed}} mm/s')
 print(f'  Spindle: S{{spindle_speed:.0f}}')
@@ -183,6 +187,21 @@ if station_path:
     rdk.AddFile(station_path)
     print(f'Loaded station: {{station_path}}')
 
+    # DIAGNOSTIC: list all machining items + programs the loaded station
+    # already contains. If any of these have invalid curve references
+    # baked in (e.g., the user accidentally hit Save in RoboDK with a
+    # renamed template), they are a likely source of Invalid-input
+    # popups during AddFile.
+    try:
+        existing_machining = rdk.ItemList(robolink.ITEM_TYPE_MACHINING, False)
+        existing_programs = rdk.ItemList(robolink.ITEM_TYPE_PROGRAM, False)
+        if existing_machining:
+            print(f'  Pre-existing machining items: {{[m.Name() for m in existing_machining]}}')
+        if existing_programs:
+            print(f'  Pre-existing programs: {{[p.Name() for p in existing_programs]}}')
+    except Exception as _e:
+        print(f'  (could not enumerate pre-existing items: {{_e}})')
+
 # Find specific station items by name
 robot = rdk.Item('KUKA KR 10 R1100-2', robolink.ITEM_TYPE_ROBOT)
 if not robot.Valid():
@@ -209,7 +228,7 @@ if not ref_frame.Valid():
 else:
     print(f'Using reference frame: {{ref_frame.Name()}}')
 
-# --- Step 1: Add the spiral as a curve object ---
+# --- Step 1: Add the combined skirt+spiral as a curve object ---
 curve_name = '{projectName}_SpiralCurve'
 
 # Remove old curve if it exists
@@ -231,10 +250,24 @@ else:
 print(f'Added curve: {{curve_name}} ({{len(points_6xn)}} points)')
 
 # --- Step 2: Use the pre-configured machining template from the station ---
-# The station must contain a machining project named '3DP_Template' with
-# all correct settings: approach/retract speed, spindle S500, post processor,
-# Robot Holds Workpiece, reference frame, tool, etc.
+# The station must contain a machining project with all the correct
+# settings (approach/retract speed, spindle S500, post processor, Robot
+# Holds Workpiece, reference frame, tool, etc.). Originally named
+# '3DP_Template'; if the user accidentally hit Save in RoboDK after a
+# previous run we may instead find the renamed-from-last-run name
+# (e.g. '3DP_T10_F50_S150_LH2'). Try the canonical name first, then
+# fall back to any machining item whose name matches the project
+# prefix.
 template = rdk.Item('3DP_Template', robolink.ITEM_TYPE_MACHINING)
+if not template.Valid():
+    _all_machining = rdk.ItemList(robolink.ITEM_TYPE_MACHINING, False) or []
+    for _m in _all_machining:
+        _nm = _m.Name()
+        if _nm == '{projectName}' or _nm.startswith('{projectName}_'):
+            template = _m
+            print(f'Note: 3DP_Template not found; reusing renamed template {{_nm}}')
+            break
+
 if not template.Valid():
     raise RuntimeError(
         '3DP_Template machining project not found in station. '
@@ -252,17 +285,22 @@ new_template_name = f'{projectName}_{{nozzle_tool}}_F{{feed_rate:.0f}}_S{{spindl
 
 # Guard: if an item with the target name already exists (from a stale
 # prior run where the station wasn't reloaded, or from the user having
-# saved a renamed template into the .rdk file), delete it first so we
-# don't end up with two station items sharing the same name — RoboDK
-# allows name duplicates and Item() lookups on that name become
-# non-deterministic, which would silently break a later Send. At this
-# point `template` still has its original name '3DP_Template', so any
-# hit on the new name is by definition a different item.
+# saved a renamed template + program into the .rdk file), delete it
+# first so we don't end up with two station items sharing the same
+# name — RoboDK allows name duplicates and Item() lookups on that
+# name become non-deterministic, which would silently break a later
+# Send. CRUCIAL: never delete the template item itself — if the user
+# saved the station with the template renamed to something matching
+# new_template_name, our chosen template IS the stale item. Compare
+# by RoboDK's internal item handle (.item) to skip it.
 for stale_type in (robolink.ITEM_TYPE_MACHINING, robolink.ITEM_TYPE_PROGRAM):
-    stale = rdk.Item(new_template_name, stale_type)
-    if stale.Valid():
-        print(f'Removing stale item with target name: {{new_template_name}}')
-        stale.Delete()
+    for _it in (rdk.ItemList(stale_type, False) or []):
+        if _it.Name() != new_template_name:
+            continue
+        if _it.item == template.item:
+            continue  # don't nuke our own template
+        print(f'Removing stale item with target name: {{_it.Name()}}')
+        _it.Delete()
 
 template.setName(new_template_name)
 print(f'Renamed template: {{new_template_name}}')
@@ -275,17 +313,37 @@ print(f'Template reference frame set to: {{ref_frame.Name()}}')
 if tool.Valid():
     template.setPoseTool(tool)
 
-# --- Step 3: Link the new curve to the template and regenerate ---
-# Use No_Update to prevent auto-solve before we set all project parameters.
-prog, status = template.setMachiningParameters('', curve_object, 'No_Update')
+# --- Step 3: Configure the template, then bind the curve ---
+# Order matters: per RoboDK's own Edit_Machining_Settings.py macro, the
+# Machining + ProgEvents params are set BEFORE the curve binding, and
+# setMachiningParameters is called WITHOUT the 'No_Update' flag. That
+# combined call writes the curve reference into the project's UI
+# Select-curve dropdown AND triggers the path solve in one step. With
+# 'No_Update' the project would generate a valid program but its UI
+# binding never registered — leaving a red-X Curve-Follow item that
+# made RoboDK pop the 'Select an APT file, curve or points: Invalid
+# input' dialog every send.
+_parent_name = curve_object.Parent().Name() if curve_object.Parent().Valid() else '(none)'
+print(f'  curve_object valid before binding: {{curve_object.Valid()}}, '
+      f'name: {{curve_object.Name()}}, parent: {{_parent_name}}')
 
-# Set machining parameters via the 'Machining' param dict.
+# Set machining parameters via the 'Machining' param dict FIRST.
 # Ref: C:/RoboDK/Library/Macros/Edit_Machining_Settings.py
-# - ApproachRetractAll=0 → unchecks 'Aproach/Retract each curve'
+# - ApproachRetractAll=0 → uncheck 'Approach/Retract each curve'.
+#   With the concatenated skirt+part curve this means: ONE approach
+#   at the very start (to the skirt's first point), continuous trace
+#   through skirt and into the part, ONE retract at the very end
+#   (from the part's last point). The skirt to part transition is a
+#   single linear move at operation speed — for clay 3DP this leaves
+#   a thin connecting drag from skirt-end to part-start, which is
+#   fine since both sit on the build plate at Z=0.
+#   (Per Issue #8 step 2 user spec: approach to skirt yes; no retract
+#   between skirt and part; no approach to part; retract at end as
+#   always.)
 # - SpeedOperation       → Operation speed (mm/s)
 # - SpeedRapid           → Approach/retract speed (mm/s), default 1000
 template.setParam('Machining', {{
-    'ApproachRetractAll': 0,          # uncheck ""Aproach/Retract each curve""
+    'ApproachRetractAll': 0,          # uncheck ""Approach/Retract each curve""
     'SpeedOperation': feed_rate,      # operation speed from plugin settings
     'SpeedRapid': travel_speed,       # approach/retract speed from plugin settings
     'RapidApproachRetract': 1,        # approach/retract as MoveJ (joint) not MoveL
@@ -305,8 +363,11 @@ template.setParam('ProgEvents', {{
 }})
 print(f'ProgEvents: start=S{{spindle_speed:.0f}} finish=S1 rounding=off')
 
-# Now solve the path
-template.Update()
+# Now bind the curve and solve in one call (no 'No_Update' flag).
+print('  About to call setMachiningParameters (with auto-update) ...')
+prog, status = template.setMachiningParameters('', curve_object)
+_prog_state = prog.Valid() if prog is not None else 'None'
+print(f'  setMachiningParameters returned status={{status}}, prog valid: {{_prog_state}}')
 
 # Rename the generated program to match the renamed template so the
 # RoboDK tree clearly identifies which run produced which program.

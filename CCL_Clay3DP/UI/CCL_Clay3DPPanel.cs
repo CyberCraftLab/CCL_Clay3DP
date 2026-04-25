@@ -44,6 +44,7 @@ namespace CCL_Clay3DP.UI
         // overwrite the panel's status with their own progress messages.
         private string _lastTranslationNote;
 
+
         // Workflow controls disabled until the user reviews Settings at least
         // once in this session. Avoids users clicking Slice with stale or
         // unconfigured params.
@@ -187,41 +188,31 @@ namespace CCL_Clay3DP.UI
                 SetStatus("Settings changed — regenerating spiral...");
                 RhinoApp.Wait();
                 RunSliceAndBake(geometryToRebuild);
-
-                // If the user has already pushed this job to RoboDK in this
-                // session, offer to keep RoboDK in sync with the new
-                // settings. Honor the same "is RoboDK running, confirm
-                // replacement" gate the manual Send button uses — settings
-                // changes shouldn't silently overwrite a live RoboDK session.
-                if (_hasSentToRoboDK && _lastResult != null
-                    && _lastResult.Frames.Count > 0)
-                {
-                    if (IsRoboDKRunning() && !ConfirmReplaceRoboDKSession())
-                    {
-                        SetStatus(
-                            "Settings changed — RoboDK auto-update cancelled. " +
-                            "Click Send to RoboDK when ready.");
-                    }
-                    else
-                    {
-                        SetStatus("Settings changed — updating RoboDK template...");
-                        RhinoApp.Wait();
-                        PerformSendToRoboDK();
-                    }
-                }
             }
             else
             {
                 SetStatus("Generated layers cleared — click Slice to regenerate");
-
-                // The Rhino-side toolpath was just cleared, but the RoboDK
-                // session still holds whatever was last sent. In Spiral mode
-                // we'd auto-rebuild + auto-resend; in Layer mode (or if we
-                // lost the geometry reference) we can't, so warn the user
-                // explicitly that RoboDK is now out of sync.
-                if (_hasSentToRoboDK)
-                    WarnRoboDKStaleAfterSettingsChange();
             }
+
+            // Re-bake the visual markers regardless of whether we did an
+            // auto-slice. ClearGeneratedContent above wiped them along
+            // with the slice content; without these calls they would
+            // stay gone until the next manual Slice click. Build Volume
+            // depends only on settings (so it's always safe to re-bake);
+            // Print Position depends on the last selected geometry, so
+            // it's only re-baked when we still have a reference to it.
+            BakeBuildVolume(doc, _settings.BuildVolume);
+            if (geometryToRebuild != null)
+                BakePrintPositionMarker(doc, geometryToRebuild);
+
+            // RoboDK is never re-launched / re-sent automatically — that
+            // is reserved for the explicit "Send to RoboDK" button (and
+            // "Run All" while it exists). If the user previously sent a
+            // job in this session, the RoboDK side is now stale; tell
+            // them so they don't accidentally simulate / run the old
+            // program.
+            if (_hasSentToRoboDK)
+                WarnRoboDKStaleAfterSettingsChange();
         }
 
         private bool HasGeneratedContent(RhinoDoc doc)
@@ -357,13 +348,25 @@ namespace CCL_Clay3DP.UI
                 _lastResult = null;
             }
 
-            // Auto-translate a copy of the selection so the print lands at
-            // world origin (bbox bottom-center → 0,0,0). Original Rhino
-            // geometry is untouched. Marker layer shows physical print
-            // location.
+            // Auto-translate the selection to world origin so the model,
+            // the toolpath, and the build-volume box all share the same
+            // frame of reference (commercial-slicer convention). The
+            // user's original Rhino object physically moves — this is
+            // intentional, matches PrusaSlicer / Cura / Bambu Studio
+            // behavior, and the move is undoable with Ctrl+Z. Subsequent
+            // slices on the same object are no-ops since the bbox
+            // bottom-center is already at origin.
             double translationDistance;
             var translation = ComputePrintingTranslation(
                 selection, out translationDistance);
+            if (doc != null && translationDistance >= 0.001
+                && selection.SourceObjectId != Guid.Empty)
+            {
+                doc.Objects.Transform(
+                    selection.SourceObjectId, translation, true);
+            }
+            // Match the in-memory Brep/Mesh copy to the doc state so the
+            // slicer operates on geometry at the origin.
             var printingSelection = ApplyTransform(selection, translation);
             if (doc != null)
             {
@@ -487,6 +490,9 @@ namespace CCL_Clay3DP.UI
                 // the extruder before the part starts.
                 var skirt = SkirtBuilder.BuildSkirt(contours[0]);
                 BakeSkirt(RhinoDoc.ActiveDoc, skirt);
+                _lastResult.SkirtCurve = skirt;
+                _lastResult.SkirtFrames = SkirtBuilder.SampleSkirtFrames(
+                    skirt, _settings.Helix.FramesPerLayer);
 
                 Rhino.UI.StatusBar.UpdateProgressMeter(100, true);
                 Rhino.UI.StatusBar.HideProgressMeter();
@@ -620,7 +626,14 @@ namespace CCL_Clay3DP.UI
         {
             if (sel == null) return null;
             if (xform == Transform.Identity) return sel;
-            var result = new GeometrySelection();
+            // Propagate the SourceObjectId to the transformed copy so the
+            // panel can still hide / restore the user's original geometry
+            // even though the slice pipeline operates on the translated
+            // duplicate.
+            var result = new GeometrySelection
+            {
+                SourceObjectId = sel.SourceObjectId,
+            };
             if (sel.Brep != null)
             {
                 var b = sel.Brep.DuplicateBrep();
@@ -900,8 +913,24 @@ namespace CCL_Clay3DP.UI
                 bool followNormal = _settings.Helix.SpiralSlice
                     && _settings.Helix.SpiralFollowsCurveNormal;
 
+                // Skirt prints first, then the part — concatenate skirt
+                // frames in front of the part frames into one continuous
+                // curve. With ApproachRetractAll=0 in the RoboDK template
+                // this gives: one approach to skirt's first point, trace
+                // the skirt, single linear move at op-speed to the part's
+                // first point (no Z lift, no extruder toggle), trace the
+                // part, one retract from the part's last point. Skirt
+                // frames have YAxis=+Z so they keep a +Z world normal
+                // even when followNormal=true for the part.
+                var combinedFrames = new List<Rhino.Geometry.Plane>(
+                    (_lastResult.SkirtFrames?.Count ?? 0)
+                    + _lastResult.Frames.Count);
+                if (_lastResult.SkirtFrames != null)
+                    combinedFrames.AddRange(_lastResult.SkirtFrames);
+                combinedFrames.AddRange(_lastResult.Frames);
+
                 string jsonPath = RoboDK.FrameSerializer.SerializeToFile(
-                    _lastResult.Frames, _settings.Robot,
+                    combinedFrames, _settings.Robot,
                     _settings.Helix.LayerHeight, followNormal);
 
                 SetStatus("Sending to RoboDK...");
@@ -1018,6 +1047,9 @@ namespace CCL_Clay3DP.UI
                         Frames = ComputeLayerFrames(pts),
                         Contours = contours,
                         LayerCount = contours.Count,
+                        SkirtCurve = skirtNoBrace,
+                        SkirtFrames = SkirtBuilder.SampleSkirtFrames(
+                            skirtNoBrace, _settings.Helix.FramesPerLayer),
                     };
 
                     SetStatus(WithTranslationNote(
@@ -1128,6 +1160,9 @@ namespace CCL_Clay3DP.UI
                 // bracing filter (Issue #8).
                 var skirtBraced = SkirtBuilder.BuildSkirt(contours[0]);
                 BakeSkirt(RhinoDoc.ActiveDoc, skirtBraced);
+                _lastResult.SkirtCurve = skirtBraced;
+                _lastResult.SkirtFrames = SkirtBuilder.SampleSkirtFrames(
+                    skirtBraced, _settings.Helix.FramesPerLayer);
 
                 SetStatus(WithTranslationNote(
                     $"Layer slice + bracing complete: {results.Count} layers" +

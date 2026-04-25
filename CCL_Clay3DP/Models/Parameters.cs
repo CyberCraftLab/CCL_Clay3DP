@@ -27,6 +27,14 @@ namespace CCL_Clay3DP.Models
     {
         public Brep Brep { get; set; }
         public Mesh Mesh { get; set; }
+
+        // ObjectId of the source Rhino object the user picked, when one
+        // exists. Empty Guid for synthetic / transformed copies (e.g.,
+        // the result of ApplyTransform after Issue #1's auto-translation
+        // — that copy has no document representation). Used by the
+        // panel to hide the original on slice and restore it on settings
+        // change.
+        public System.Guid SourceObjectId { get; set; } = System.Guid.Empty;
     }
 
     public class HeightParameters

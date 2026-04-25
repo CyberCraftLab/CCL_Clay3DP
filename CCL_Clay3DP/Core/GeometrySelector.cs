@@ -42,7 +42,10 @@ namespace CCL_Clay3DP.Core
             if (objRef == null)
                 return null;
 
-            var result = new GeometrySelection();
+            var result = new GeometrySelection
+            {
+                SourceObjectId = objRef.ObjectId,
+            };
 
             var brep = objRef.Brep();
             if (brep != null)

@@ -26,5 +26,13 @@ namespace CCL_Clay3DP.Core
         public Curve AxisCurve { get; set; }
         public double TotalHeight { get; set; }
         public int LayerCount { get; set; }
+
+        // Skirt loop (Issue #8). The robot prints the skirt first, then
+        // the part. Frames always use +Z world normal regardless of
+        // SpiralFollowsCurveNormal — the skirt sits flat on the build
+        // plate. Empty list = no skirt (e.g., slice failed to produce
+        // a usable lowest contour).
+        public List<Plane> SkirtFrames { get; set; } = new List<Plane>();
+        public Curve SkirtCurve { get; set; }
     }
 }

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.Collections.Generic;
 using System.Linq;
 using Rhino.Geometry;
 
@@ -87,6 +88,49 @@ namespace CCL_Clay3DP.Core
             {
                 return null;
             }
+        }
+
+        /// <summary>
+        /// Sample the skirt curve into a list of frames the robot can
+        /// follow. Sampling is by uniform arc-length so the per-frame
+        /// spacing is consistent regardless of where the curve's
+        /// internal seam lies. The last frame duplicates the first so
+        /// the loop closes back on itself when RoboDK traces the curve.
+        ///
+        /// Frame normals are ALWAYS +Z world (build plate up). The
+        /// SpiralFollowsCurveNormal toggle does not apply to the skirt
+        /// — it sits flat on the plate by construction.
+        /// </summary>
+        public static List<Plane> SampleSkirtFrames(Curve skirt, int sampleCount)
+        {
+            var frames = new List<Plane>();
+            if (skirt == null || sampleCount < 4) return frames;
+
+            // DivideByCount(N, true) returns N+1 parameters, with the last
+            // one at curve.Domain.T1 — for a closed curve that coincides
+            // spatially with the first sample, naturally closing the loop.
+            double[] ts = skirt.DivideByCount(sampleCount, true);
+            if (ts == null || ts.Length == 0) return frames;
+
+            foreach (var t in ts)
+            {
+                var pt = skirt.PointAt(t);
+                var tangent = skirt.TangentAt(t);
+                if (!tangent.IsValid || tangent.IsZero)
+                    tangent = Vector3d.XAxis;
+
+                // Build a plane with X = tangent (in XY plane) and
+                // Y = +Z. FrameSerializer reads frame.YAxis when
+                // followCurveNormal is true, so making YAxis = +Z
+                // guarantees the skirt always carries a +Z world
+                // normal regardless of what the part is set to —
+                // important now that skirt + part frames get
+                // concatenated into one continuous curve.
+                var tangentXY = new Vector3d(tangent.X, tangent.Y, 0.0);
+                if (!tangentXY.Unitize()) tangentXY = Vector3d.XAxis;
+                frames.Add(new Plane(pt, tangentXY, Vector3d.ZAxis));
+            }
+            return frames;
         }
 
         private static Curve PickLargerArea(Curve a, Curve b)
