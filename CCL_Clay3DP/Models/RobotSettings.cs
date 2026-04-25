@@ -12,28 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-using Newtonsoft.Json;
-using Newtonsoft.Json.Converters;
-
 namespace CCL_Clay3DP.Models
 {
-    [JsonConverter(typeof(StringEnumConverter))]
-    public enum TiltMode
-    {
-        Normal,
-        LeadLag,
-        VerticalBias,
-    }
-
     public class RobotSettings
     {
         public double FeedRate { get; set; } = 100.0;
         public double TravelSpeed { get; set; } = 166.7;
 
-        [JsonConverter(typeof(StringEnumConverter))]
-        public TiltMode TiltMode { get; set; } = TiltMode.Normal;
-        public double LeadAngle { get; set; } = 0.0;
-        public double VerticalBias { get; set; } = 0.0;
         public double MaxWristAngularVelocity { get; set; } = 90.0;
         public double SpindleSpeed { get; set; } = 500.0;
         public string NozzleTool { get; set; } = "T10";
