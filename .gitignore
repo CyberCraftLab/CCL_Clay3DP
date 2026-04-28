@@ -9,6 +9,6 @@ obj/
 
 # Personal tooling / non-public work
 .claude/
-G-Code_Proofing/
+**/G-Code_Proofing/
 Calibration_Videos
 dist/
