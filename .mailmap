@@ -1,0 +1,10 @@
+# Normalize committer/author identities so git log, GitLab, and any
+# other tool consistently shows the canonical "Christophe Barlieb"
+# name for commits that were authored under a Windows machine name.
+# Non-destructive — commit objects themselves are unchanged; this
+# file just remaps how those identities are displayed.
+#
+# Format (per `man gitmailmap`):
+#   <canonical-name> <canonical-email> <commit-name> <commit-email>
+
+Christophe Barlieb <christophe.barlieb@oth-regensburg.de> LAPTOP-1VMKO9GU\CyberCraft <christophe.barlieb@oth-regensburg.de>
