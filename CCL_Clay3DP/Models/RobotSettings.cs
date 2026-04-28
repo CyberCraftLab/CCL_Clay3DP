@@ -24,7 +24,12 @@ namespace CCL_Clay3DP.Models
         public string NozzleTool { get; set; } = "T10";
 
         public string RoboDKExecutablePath { get; set; } = @"C:\RoboDK\bin\RoboDK.exe";
-        public string RoboDKStationTemplatePath { get; set; } = @"C:\Users\Thinkpad\Documents\3DP\robodk_station\3DP_v0.4.rdk";
+        // Intentionally empty — the station template lives wherever the
+        // user clones / unzips this repo, so we can't predict the path.
+        // First-run users set it via the Browse button next to this field
+        // in the Settings dialog. Was previously hardcoded to a developer
+        // workstation path; cleaned for public release.
+        public string RoboDKStationTemplatePath { get; set; } = "";
         public string RoboDKProjectName { get; set; } = "3DP";
         public string RoboDKPythonExe { get; set; } = @"C:\RoboDK\Python-Embedded\python.exe";
         public string RoboDKApiPath { get; set; } = @"C:\RoboDK\Python";
