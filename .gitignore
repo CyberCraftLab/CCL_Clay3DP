@@ -6,9 +6,20 @@ __pycache__/
 # .NET build artifacts
 bin/
 obj/
+.vs/
+*.user
+*.suo
+
+# OS metadata
+Thumbs.db
+.DS_Store
+*.swp
+*.swo
 
 # Personal tooling / non-public work
 .claude/
 **/G-Code_Proofing/
+BenchTests/
 Calibration_Videos
+Collected Settings/
 dist/
