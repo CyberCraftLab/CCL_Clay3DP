@@ -31,6 +31,9 @@ namespace CCL_Clay3DP.Settings
         private NumericStepper _beadDiameter;
         private NumericStepper _maxOverhang;
         private NumericStepper _materialDensity;
+        private NumericStepper _waterPercent;
+        private CheckBox _enableShrinkageCheck;
+        private NumericStepper _shrinkagePercent;
 
         // Base fields (Issue #10) — multi-layer skirt + contour + 45-deg
         // cross-hatch infill raft for closed-loop / vase-style parts. The
@@ -81,7 +84,8 @@ namespace CCL_Clay3DP.Settings
         {
             _settings = settings;
             Title = "CCL_Clay3DP Settings";
-            MinimumSize = new Size(460, 600);
+            // Landscape layout: three columns (Material+Volume / Tool+Toolpath / Robot).
+            MinimumSize = new Size(1100, 520);
             Resizable = true;
 
             BuildUI();
@@ -99,6 +103,23 @@ namespace CCL_Clay3DP.Settings
             _beadDiameter = CreateStepper(0.5, 20.0, 0.5, 1);
             _maxOverhang = CreateStepper(1.0, 60.0, 1.0, 1);
             _materialDensity = CreateStepper(0.5, 5.0, 0.1, 1);
+            // Water % range covers everything realistic: below ~3% is
+            // unworkably dry, above ~25% is slip. User experiments are
+            // currently in the 6-12% band.
+            _waterPercent = CreateStepper(0.0, 30.0, 0.5, 1);
+
+            // Shrinkage compensation — toggle gates the % stepper. Stoneware
+            // total shrinkage typically 10-13%; range 0-25% covers anything
+            // realistic. Calibration database (Slice 2c) will eventually
+            // auto-fill this from measured per-material data.
+            _enableShrinkageCheck = new CheckBox { Text = "Enable shrinkage compensation" };
+            _enableShrinkageCheck.ToolTip =
+                "When ON, the slice pipeline scales the input geometry " +
+                "uniformly so the printed part (after drying + firing " +
+                "shrinkage) lands at the size you modeled. Scale is applied " +
+                "about the part footprint centroid on Z=0.";
+            _enableShrinkageCheck.CheckedChanged += (s, e) => UpdateShrinkageFieldsEnabled();
+            _shrinkagePercent = CreateStepper(0.0, 25.0, 0.5, 1);
 
             var clayGroup = new GroupBox
             {
@@ -123,6 +144,19 @@ namespace CCL_Clay3DP.Settings
                         LabeledRow("Material density (g/cm3)", _materialDensity,
                             "Mass per unit volume of the clay mix. Used to estimate part " +
                             "weight in the analyzer."),
+                        LabeledRow("Water % added", _waterPercent,
+                            "Water added during mix, as percentage of dry clay mass " +
+                            "(additive: 6% = 60 g water per 1 kg dry clay). Higher water = " +
+                            "more fluid (smaller nozzles work) but max overhang drops and " +
+                            "drying shrinkage increases. Recorded only for now — does not " +
+                            "yet drive nozzle / feedrate recommendations."),
+                        new TableRow(null, _enableShrinkageCheck),
+                        LabeledRow("Total shrinkage %", _shrinkagePercent,
+                            "Combined drying + firing shrinkage of the chosen clay/mix. " +
+                            "When the toggle above is ON, geometry is scaled up by " +
+                            "1/(1-pct/100) so the post-firing part matches the modeled " +
+                            "size. Stoneware typically 10-13%. Measure with a calibration " +
+                            "bar to dial in your actual value."),
                     },
                 },
             };
@@ -204,7 +238,7 @@ namespace CCL_Clay3DP.Settings
                 },
             };
 
-            // --- Robot / Printer ---
+            // --- Robot / Extruder ---
             _feedRate = CreateStepper(1.0, 500.0, 10.0, 1);
             _maxWristAngularVel = CreateStepper(1.0, 360.0, 5.0, 0);
             _spindleSpeed = CreateStepper(0, 9999, 50, 0);
@@ -256,9 +290,30 @@ namespace CCL_Clay3DP.Settings
                 },
             };
 
+            // --- Tool / Nozzle ---
+            // Nozzle dropdown lives in its own group (split out from Robot
+            // section in the landscape redesign). Section is intentionally
+            // sparse — expansion (diameter, tip offset, etc.) tracked under
+            // GitLab issue #12.
+            var toolGroup = new GroupBox
+            {
+                Text = "Tool / Nozzle",
+                Content = new TableLayout
+                {
+                    Spacing = new Size(8, 4),
+                    Padding = new Padding(8),
+                    Rows =
+                    {
+                        LabeledRow("Nozzle tool", _nozzleTool,
+                            "RoboDK tool number - selects which calibrated tool offset to " +
+                            "use. T10/T11/T12 must match what's defined in your station template."),
+                    },
+                },
+            };
+
             var robotGroup = new GroupBox
             {
-                Text = "Robot / Printer",
+                Text = "Robot / Extruder",
                 Content = new TableLayout
                 {
                     Spacing = new Size(8, 4),
@@ -278,9 +333,6 @@ namespace CCL_Clay3DP.Settings
                             "CCL-ALTAR-01 calibration, RPM = 0.386*S + 14.94 for S >= 50; " +
                             "sweet spot S = 116-428 (1-3 rot/s). Front-panel ratio pot " +
                             "must be at 1."),
-                        LabeledRow("Nozzle tool", _nozzleTool,
-                            "RoboDK tool number - selects which calibrated tool offset to " +
-                            "use. T10/T11/T12 must match what's defined in your station template."),
                         BrowseRow("RoboDK executable", _roboDKExePath, browseDKExe,
                             "Full path to RoboDK.exe. Use the Browse button if unsure."),
                         BrowseRow("Station template", _stationTemplatePath, browseStation,
@@ -322,28 +374,64 @@ namespace CCL_Clay3DP.Settings
             DefaultButton = okButton;
             AbortButton = cancelButton;
 
-            // The settings groups go inside a Scrollable so smaller laptop
-            // displays get scrollbars instead of having the OK/Cancel row
-            // pushed off-screen. The button row sits OUTSIDE the Scrollable
-            // so it stays visible regardless of how the user scrolls.
+            // Three landscape columns. Each column is a vertical stack of
+            // GroupBoxes; column widths scale equally with dialog width.
+            //   Left:   Clay Material   + Build Volume
+            //   Middle: Tool / Nozzle   + Toolpath
+            //   Right:  Robot / Extruder
+            var leftColumn = new TableLayout
+            {
+                Spacing = new Size(0, 8),
+                Rows =
+                {
+                    new TableRow(clayGroup),
+                    new TableRow(buildVolumeGroup),
+                    null,
+                },
+            };
+            var middleColumn = new TableLayout
+            {
+                Spacing = new Size(0, 8),
+                Rows =
+                {
+                    new TableRow(toolGroup),
+                    new TableRow(spiralGroup),
+                    null,
+                },
+            };
+            var rightColumn = new TableLayout
+            {
+                Spacing = new Size(0, 8),
+                Rows =
+                {
+                    new TableRow(robotGroup),
+                    null,
+                },
+            };
+
+            var columns = new TableLayout
+            {
+                Spacing = new Size(8, 0),
+                Padding = new Padding(0),
+                Rows =
+                {
+                    new TableRow(
+                        new TableCell(leftColumn, true),
+                        new TableCell(middleColumn, true),
+                        new TableCell(rightColumn, true)),
+                },
+            };
+
+            // The columns go inside a Scrollable so smaller laptop displays
+            // get scrollbars instead of having the OK/Cancel row pushed
+            // off-screen. The button row sits OUTSIDE the Scrollable so it
+            // stays visible regardless of how the user scrolls.
             var scrollableContent = new Scrollable
             {
                 Border = BorderType.None,
                 ExpandContentWidth = true,
                 ExpandContentHeight = false,
-                Content = new TableLayout
-                {
-                    Spacing = new Size(0, 8),
-                    Padding = new Padding(0),
-                    Rows =
-                    {
-                        new TableRow(clayGroup),
-                        new TableRow(spiralGroup),
-                        new TableRow(robotGroup),
-                        new TableRow(buildVolumeGroup),
-                        null, // soak any extra vertical space inside the scroller
-                    },
-                },
+                Content = columns,
             };
 
             var buttonRow = new TableLayout
@@ -429,6 +517,14 @@ namespace CCL_Clay3DP.Settings
             _beadDiameter.Value = _settings.Clay.BeadDiameter;
             _maxOverhang.Value = _settings.Clay.MaxOverhangAngle;
             _materialDensity.Value = _settings.Clay.MaterialDensity;
+            _waterPercent.Value = _settings.Clay.WaterPercent;
+            _enableShrinkageCheck.Checked = _settings.Clay.EnableShrinkageCompensation;
+            // Clamp imported value into the stepper's range so out-of-spec
+            // settings.json files don't blow up the dialog.
+            double clampedShrinkage = _settings.Clay.ShrinkagePercent;
+            if (clampedShrinkage < 0.0) clampedShrinkage = 0.0;
+            if (clampedShrinkage > 25.0) clampedShrinkage = 25.0;
+            _shrinkagePercent.Value = clampedShrinkage;
 
             // Base
             _enableBaseCheck.Checked = _settings.Base.EnableBase;
@@ -472,6 +568,7 @@ namespace CCL_Clay3DP.Settings
 
             UpdateToolpathFieldsEnabled();
             UpdateBaseFieldsEnabled();
+            UpdateShrinkageFieldsEnabled();
         }
 
         private void SaveValues()
@@ -490,6 +587,9 @@ namespace CCL_Clay3DP.Settings
             _settings.Clay.BeadDiameter = _beadDiameter.Value;
             _settings.Clay.MaxOverhangAngle = _maxOverhang.Value;
             _settings.Clay.MaterialDensity = _materialDensity.Value;
+            _settings.Clay.WaterPercent = _waterPercent.Value;
+            _settings.Clay.EnableShrinkageCompensation = _enableShrinkageCheck.Checked ?? false;
+            _settings.Clay.ShrinkagePercent = _shrinkagePercent.Value;
 
             // Base
             _settings.Base.EnableBase = _enableBaseCheck.Checked ?? false;
@@ -544,6 +644,15 @@ namespace CCL_Clay3DP.Settings
         {
             bool on = _enableBaseCheck.Checked ?? false;
             _baseLayerCount.Enabled = on;
+        }
+
+        /// <summary>
+        /// Gray out the shrinkage % stepper when compensation is disabled.
+        /// </summary>
+        private void UpdateShrinkageFieldsEnabled()
+        {
+            bool on = _enableShrinkageCheck.Checked ?? false;
+            _shrinkagePercent.Enabled = on;
         }
 
         /// <summary>

@@ -392,6 +392,28 @@ namespace CCL_Clay3DP.UI
             // Match the in-memory Brep/Mesh copy to the doc state so the
             // slicer operates on geometry at the origin.
             var printingSelection = ApplyTransform(selection, translation);
+
+            // Shrinkage compensation (Slice 2b) — uniform XYZ scale about
+            // world origin, which after the auto-translate above coincides
+            // with the part footprint centroid on Z=0. Applied AFTER the
+            // translate so the scale center is correct, and BEFORE the
+            // marker / build-volume bake and the slice runners so every
+            // downstream consumer (printability analyzer, build-volume
+            // check, slicer) sees the scaled geometry. The user's source
+            // Rhino object is left at design size — only the in-memory
+            // copy used by the slicer grows.
+            double shrinkageScaleApplied = 1.0;
+            if (_settings.Clay.EnableShrinkageCompensation
+                && _settings.Clay.ShrinkagePercent > 0.0
+                && _settings.Clay.ShrinkagePercent < 100.0)
+            {
+                shrinkageScaleApplied =
+                    1.0 / (1.0 - _settings.Clay.ShrinkagePercent / 100.0);
+                var shrinkageScale = Transform.Scale(
+                    Point3d.Origin, shrinkageScaleApplied);
+                printingSelection = ApplyTransform(printingSelection, shrinkageScale);
+            }
+
             if (doc != null)
             {
                 BakePrintPositionMarker(doc, printingSelection);
@@ -401,6 +423,13 @@ namespace CCL_Clay3DP.UI
                 ? "Geometry already at origin"
                 : $"Geometry translated {translationDistance:F1} mm to " +
                   "origin for printing";
+            if (shrinkageScaleApplied > 1.0)
+            {
+                double upscalePct = (shrinkageScaleApplied - 1.0) * 100.0;
+                translationMsg +=
+                    $" · scaled +{upscalePct:F1}% for " +
+                    $"{_settings.Clay.ShrinkagePercent:F1}% shrinkage compensation";
+            }
             _lastTranslationNote = translationMsg;
             SetStatus(translationMsg);
 
