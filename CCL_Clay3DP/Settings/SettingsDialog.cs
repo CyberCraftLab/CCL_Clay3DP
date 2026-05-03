@@ -109,8 +109,8 @@ namespace CCL_Clay3DP.Settings
 
             // Shrinkage compensation — toggle gates the % stepper. Stoneware
             // total shrinkage typically 10-13%; range 0-25% covers anything
-            // realistic. Calibration database (Slice 2c) will eventually
-            // auto-fill this from measured per-material data.
+            // realistic. A future calibration database will auto-fill this
+            // from measured per-material data.
             _enableShrinkageCheck = new CheckBox { Text = "Enable shrinkage compensation" };
             _enableShrinkageCheck.ToolTip =
                 "When ON, the slice pipeline scales the input geometry " +

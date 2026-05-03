@@ -1,6 +1,6 @@
 # CCL_Clay3DP — Architecture overview
 
-Generated 2026-05-03 on branch `settings-ui` (Slices 1, 2a, 2b, 2d shipped; Slice 2e in progress).
+Last refreshed 2026-05-03 against `main` at `v1.2.0-alpha` (merge commit `b8e2be9`). Reflects all settings-ui work shipped in that release: slices 1, 2a, 2b, 2d, 2e, 2f, 3, 5a, 5b, 5c.
 
 This document is meant to be printed and pinned next to the workstation. Each diagram is a Mermaid block — render in VS Code (Mermaid extension), GitHub/GitLab, or paste into <https://mermaid.live> to view/export PNG.
 
@@ -100,47 +100,65 @@ flowchart TD
     OnPreviewClayModelClick --> PreviewBuild[Build mesh tube around toolpath<br/>at bead diameter]
 ```
 
-**Key gates that block buttons:**
+**Key gates that block buttons / pipeline runs:**
 
 - `_settingsReviewed` — Slice/Analyze/Send/RunAll/Preview are disabled until the user opens Settings at least once per session. Avoids users running with stale defaults.
 - `_lastSliceOutOfBounds` — set by post-slice build-volume check (Slice 2d). When true, Send shows a "robot would crash" popup and refuses to run. RunAll short-circuits past Analyze + Send.
+- **Layer height ≤ bead diameter** (Slice 5a) — checked at the top of RunPipeline (and again at the top of OnPreviewClayModelClick). Layer height larger than bead diameter is physically impossible (clay can't span a vertical gap larger than itself); rejected with an explanatory popup before any state changes.
+- **Outer Wall Bracing requires ruled geometry** — checked inside RunPipeline. Layer mode + bracing on free-form geometry is rejected before any state changes.
 
 ---
 
-## 3. Slice pipeline (post-Slice-2e — the target architecture)
+## 3. Slice pipeline (RunPipeline)
+
+`RunPipeline(GeometrySelection)` is the single entry point — three call sites feed into it. Don't sneak slice logic into a single caller; modify RunPipeline so all three paths get it.
 
 ```mermaid
 flowchart TD
-    SliceClick[OnSliceClick] --> Pick[GeometrySelector.Select<br/>user picks Brep/Surface/Mesh]
+    SliceClick[OnSliceClick<br/>manual] --> Pick[GeometrySelector.Select<br/>Brep/Surface/Mesh]
     Pick -->|null| Cancel1([cancelled])
-    Pick --> BracingGate{Bracing + free-form?<br/>Layer mode + bracing<br/>+ NOT IsRuled}
+    Pick --> RunPipelineIn
+
+    SettingsAuto[OnSettingsClick<br/>auto-rebuild — Slice 2e] --> LBCheck1{Layer + Bracing?}
+    LBCheck1 -->|yes| Fallback1([clear + 'click Slice'<br/>fallback message])
+    LBCheck1 -->|no| RunPipelineIn2[RunPipeline _lastRawGeometry]
+
+    GeomChange[OnRhinoObjectReplaced<br/>Slice 2f] --> Match{ObjectId match<br/>_lastRawGeometry?<br/>+ not suppressed}
+    Match -->|no| Ignore([ignore])
+    Match -->|yes| Debounce[UITimer 500 ms<br/>coalesces drag]
+    Debounce --> Elapsed[OnRebuildDebounceElapsed]
+    Elapsed --> LBCheck2{Layer + Bracing?}
+    LBCheck2 -->|yes| Fallback2([click Slice fallback])
+    LBCheck2 -->|no| Fetch[doc.Objects.Find<br/>build fresh GeometrySelection]
+    Fetch --> RunPipelineIn3[RunPipeline fresh]
+
+    RunPipelineIn[RunPipeline] --> LayerHeightGate{LayerHeight > BeadDiameter?<br/>Slice 5a}
+    RunPipelineIn2 --> LayerHeightGate
+    RunPipelineIn3 --> LayerHeightGate
+    LayerHeightGate -->|yes| RejectLayer([popup: physically impossible])
+    LayerHeightGate -->|no| BracingGate{Layer + Bracing<br/>on free-form?}
     BracingGate -->|yes| RejectBracing([popup: bracing not permitted])
-    BracingGate -->|no| Translate[ComputePrintingTranslation<br/>doc.Objects.Transform<br/>auto-translate to origin]
-    Translate --> CacheRaw[_lastRawGeometry = post-translate selection<br/>used by auto-rebuild]
-    CacheRaw --> RunPipelineIn[RunPipeline]
+    BracingGate -->|no| Reset[_lastSliceOutOfBounds = false]
 
-    SettingsAuto[OnSettingsClick<br/>auto-rebuild branch] --> LayerBracingCheck{Layer + Bracing?}
-    LayerBracingCheck -->|yes| FallbackMsg([clear + 'click Slice<br/>to regenerate' message])
-    LayerBracingCheck -->|no| RunPipelineIn
-
-    RunPipelineIn --> Reset[_lastSliceOutOfBounds = false]
     Reset --> Clear[ClearGeneratedContent<br/>_lastResult = null]
-    Clear --> Shrink{Shrinkage compensation enabled?}
-    Shrink -->|yes| ApplyScale[Transform.Scale about Point3d.Origin<br/>factor = 1 / 1-pct/100]
+    Clear --> Translate[Auto-translate to origin<br/>doc.Objects.Transform inside<br/>_suppressGeometryChangeRebuild guard]
+    Translate --> CacheRaw[_lastRawGeometry =<br/>post-translate selection]
+    CacheRaw --> Shrink{Shrinkage enabled?}
+    Shrink -->|yes| ApplyScale[Transform.Scale about Point3d.Origin<br/>factor = 1 / 1−pct/100]
     Shrink -->|no| Bake
     ApplyScale --> Bake[BakePrintPositionMarker<br/>BakeBuildVolume]
     Bake --> Status[SetStatus: translation + scale note]
-    Status --> PreCheck[BuildVolumeCheck.SelectionBoundingBox<br/>BuildVolumeCheck.Check]
+    Status --> PreCheck[BuildVolumeCheck pre-slice<br/>geometry bbox]
     PreCheck -->|HasOverflow| PrePopup{ConfirmPreSliceBuildVolumeOverflow}
     PrePopup -->|Cancel| Cancel2([slice cancelled])
     PrePopup -->|Continue Anyway| ModeChoice
     PreCheck -->|fits| ModeChoice
-    ModeChoice{Spiral or Layer?}
+    ModeChoice{Spiral or Layer mode?}
     ModeChoice -->|Spiral| RunSliceAndBake[RunSliceAndBake<br/>see section 3a]
     ModeChoice -->|Layer| RunLayerSlice[RunLayerSlice]
     RunSliceAndBake --> PostCheck
     RunLayerSlice --> PostCheck
-    PostCheck[BuildVolumeCheck.FrameStreamBoundingBox<br/>skirt + base + part frames]
+    PostCheck[BuildVolumeCheck post-slice<br/>FrameStreamBoundingBox<br/>skirt + base + part frames]
     PostCheck -->|HasOverflow| ArmFlag[_lastSliceOutOfBounds = true<br/>NotifyPostSliceBuildVolumeOverflow popup]
     PostCheck -->|fits| Done([slice complete])
     ArmFlag --> Done2([baked but Send blocked])
@@ -196,7 +214,7 @@ flowchart TD
     Wait5s -.-> Hand[Hand off to background<br/>Python keeps running]
 ```
 
-**Known issue (under investigation):** on first send (cold-start RoboDK), the Python script's `Robolink()` call should auto-launch RoboDK, but the immediate `setParam`/`CloseStation`/`AddFile` calls hit the API before RoboDK is fully ready. Symptom: first send "succeeds" silently but RoboDK doesn't appear; second send works because RoboDK is already up. Fix is its own slice (RoboDK launch reliability) — needs a captured log to diagnose precisely.
+**Cold-start launch behaviour:** `Robolink()` auto-launches RoboDK if it isn't running. As of v1.2.0-alpha testing, first-send works reliably; an earlier-flagged race condition (Python continuing past `setParam`/`CloseStation` before RoboDK was ready) was not reproducible at release time and is not actively tracked. If first-send "succeeds" silently with no RoboDK window appearing, capture `%TEMP%/ccl_clay3dp_TIMESTAMP.log` (path is logged on each send) — the script's stdout/stderr there will show exactly which API call hung.
 
 ---
 
@@ -267,11 +285,10 @@ classDiagram
         int LayerCount
     }
     class BuildVolumeSettings {
-        double XMin
-        double XMax
-        double YMin
-        double YMax
+        double Width
+        double Depth
         double Height
+        +XMin XMax YMin YMax computed JsonIgnore
     }
     PipelineSettings --> ClayMaterialSettings
     PipelineSettings --> HelixParameters
@@ -290,11 +307,13 @@ classDiagram
 | `_settingsReviewed` | `bool` | `OnSettingsClick` (first OK) | button enable gate | force user through Settings before slicing |
 | `_lastResult` | `SpiralResult` | runners (`RunSliceAndBake`, `RunLayerSlice`) | `OnAnalyzeClick`, `OnSendToRoboDKClick`, post-slice check | toolpath cache for Analyze + Send |
 | `_lastGeometry` | `GeometrySelection` | runners | `OnAnalyzeClick` (heatmap), `OnSettingsClick` (marker re-bake) | scaled selection used by heatmap display |
-| `_lastRawGeometry` | `GeometrySelection` | `OnSliceClick` (post-translate, pre-shrinkage) | `OnSettingsClick` auto-rebuild | input for full-pipeline regenerate after settings change (Slice 2e) |
+| `_lastRawGeometry` | `GeometrySelection` | `RunPipeline` (post-translate, pre-shrinkage) | `OnSettingsClick` auto-rebuild + Slice 2f geometry-change handler + filter | input for full-pipeline regenerate after settings/geometry change |
 | `_lastSliceOutOfBounds` | `bool` | post-slice check (Slice 2d) | `OnSendToRoboDKClick` (block), `OnRunAllClick` (short-circuit) | gate to prevent robot crash |
-| `_lastTranslationNote` | `string` | OnSliceClick / RunPipeline | `WithTranslationNote` (consumed once) | stash translation+scale message so completion status can append it |
+| `_lastTranslationNote` | `string` | RunPipeline | `WithTranslationNote` (consumed once) | stash translation+scale message so completion status can append it |
 | `_hasSentToRoboDK` | `bool` | `PerformSendToRoboDK` (on success) | `OnSettingsClick` (warn-stale trigger) | tracks whether RoboDK is in the workflow this session |
 | `_gatedControls` | `List<Control>` | ctor (button list) | `OnSettingsClick` (unlock on first review) | controls disabled until `_settingsReviewed` |
+| `_suppressGeometryChangeRebuild` | `bool` | wraps `doc.Objects.Transform` in RunPipeline | `OnRhinoObjectReplaced` handler | recursion guard (Slice 2f) — prevents our own auto-translate from re-firing the geometry-change rebuild → infinite loop |
+| `_rebuildDebounce` | `UITimer` | ctor (Interval = 0.5s) | `OnRhinoObjectReplaced` (Start/Stop) → `OnRebuildDebounceElapsed` | Slice 2f — coalesces a continuous Gumball drag into ONE rebuild on release |
 
 ---
 
@@ -316,12 +335,24 @@ classDiagram
 
 ## 8. Recent slice history (context for understanding decisions)
 
+All shipped in v1.2.0-alpha (2026-05-03).
+
 | Slice | What landed | Why it matters here |
 |---|---|---|
 | 1 | Landscape 3-col SettingsDialog layout, nozzle moved to Tool group, Robot/Printer→Robot/Extruder | Dialog structure mirrors the conceptual sections in this doc |
-| 2a | `WaterPercent` field (recorded only) | New Material section field; downstream behavior deferred until lab experiments produce a curve |
-| 2b | Shrinkage compensation toggle + pipeline scale | The reason `_lastRawGeometry` exists (compounding shrinkage on auto-rebuild was the bug) |
-| 2d | Build-volume check + Send block + popups | Catches oversized scaled parts before they crash the robot |
-| 2e | RunPipeline extraction + Settings auto-rebuild via full pipeline | (in progress) Fixes shrinkage not refreshing on settings change |
+| 2a | `WaterPercent` field (recorded only) | New Material section field; downstream behaviour deferred until lab experiments produce a curve |
+| 2b | Shrinkage compensation toggle + pipeline scale | The reason `_lastRawGeometry` exists — compounding shrinkage on auto-rebuild was the bug |
+| 2d | Build-volume check + Send block + popups | Catches oversized scaled parts before they crash the robot. New `Analysis/BuildVolumeCheck.cs` |
+| 2e | `RunPipeline` extraction + Settings auto-rebuild via full pipeline | Fixes shrinkage not refreshing on settings change. Single entry point for all three pipeline triggers |
+| 2f | `RhinoDoc.ReplaceRhinoObject` subscription + 500 ms debounce + recursion guard | Auto-rebuild on Gumball edits — no need to click Slice after rescaling a part |
+| 3 | `BuildVolumeSettings` Width × Depth × Height + `[JsonExtensionData]` migration | Simpler dialog (3 fields not 5); JSON migration pattern for future schema changes |
+| 5a | Layer height ≤ bead diameter rejected with popup | Physical-feasibility gate at top of RunPipeline + Preview |
+| 5b | Skirt + Base layers added to Preview Clay Model source | Preview now reflects the full clay deposition, not just the part body |
+| 5c | Elliptical pipe in Preview when layer < bead (W = D²/H, area-conserved) | New `BuildEllipticalTube` helper; matches the physical reality of a squashed bead |
 
-Pending: Slice 2c (calibration database), Slice 3 (Build Volume W×D×H simplification), Slice 4 (Tool/Nozzle expansion = #12), RoboDK launch reliability (separate slice — needs failing log).
+Pending after v1.2.0-alpha:
+
+- **Slice 2c** — calibration database (CSV in `CCL_Clay3DP/Materials/`, schema covers shrinkage + water-% experiments + nozzle observations).
+- **Slice 4** — Tool/Nozzle section expansion. Aligns with GitLab #12 (drop-down for various nozzles).
+- **Chamotte %** field on Material section — supplier-label data, affects max wall height + nozzle wear.
+- **RoboDK launch reliability** — closed at release time (self-resolved during testing); track recurrence via the temp log path.

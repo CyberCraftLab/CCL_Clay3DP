@@ -51,30 +51,28 @@ namespace CCL_Clay3DP.UI
         private bool _lastSliceOutOfBounds = false;
 
         // Post-auto-translate, PRE-shrinkage cached selection. Used by
-        // OnSettingsClick's auto-rebuild path (Slice 2e) so a settings
-        // change re-runs the full pipeline (shrinkage scale + checks +
-        // slice) on the same geometry without re-prompting the user
-        // to pick it. Distinct from _lastGeometry, which the runners
-        // overwrite with the post-shrinkage scaled selection (used by
-        // the heatmap analyzer). Re-applying shrinkage to an already-
-        // scaled selection would compound the scale, hence the split.
+        // the auto-rebuild paths so a settings or geometry change re-runs
+        // the full pipeline (shrinkage scale + checks + slice) on the
+        // same geometry without re-prompting the user to pick it.
+        // Distinct from _lastGeometry, which the runners overwrite with
+        // the post-shrinkage scaled selection (used by the heatmap
+        // analyzer) — re-applying shrinkage to an already-scaled
+        // selection would compound the scale.
         private GeometrySelection _lastRawGeometry;
 
-        // Slice 2f — set true around our own doc.Objects.Transform call
-        // (the auto-translate inside RunPipeline) so the
-        // ReplaceRhinoObject handler ignores the event we triggered
-        // ourselves. Without this, RunPipeline's auto-translate would
-        // re-fire the handler → rebuild → transform → infinite loop.
-        // Rhino fires ReplaceRhinoObject synchronously during the
-        // transform, so a simple bool flag is sufficient.
+        // Set true around our own doc.Objects.Transform call (the auto-
+        // translate inside RunPipeline) so the ReplaceRhinoObject handler
+        // ignores the event we triggered ourselves. Without this, the
+        // auto-translate would re-fire the handler → rebuild → transform
+        // → infinite loop. Rhino fires ReplaceRhinoObject synchronously
+        // during the transform, so a simple bool flag is sufficient.
         private bool _suppressGeometryChangeRebuild = false;
 
-        // Slice 2f — debounces the auto-rebuild trigger so dragging
+        // Debounces the geometry-change auto-rebuild trigger so dragging
         // the Gumball (which fires ReplaceRhinoObject many times per
         // second) only kicks off ONE rebuild when the user releases.
-        // 500 ms is a comfortable wait — long enough that a continuous
-        // drag coalesces, short enough to feel responsive after a
-        // single click-and-drop edit.
+        // 500 ms is long enough that a continuous drag coalesces, short
+        // enough to feel responsive after a single click-and-drop edit.
         private UITimer _rebuildDebounce;
 
 
@@ -89,12 +87,30 @@ namespace CCL_Clay3DP.UI
             _settings = SettingsManager.Load();
             BuildUI();
 
-            // Slice 2f — debounced auto-rebuild on source-geometry
-            // transform. Subscribe to the global Rhino event; the handler
-            // filters for our cached _lastRawGeometry.SourceObjectId.
+            // Debounced auto-rebuild on source-geometry transform.
+            // Subscribe to the global Rhino event; the handler filters
+            // for our cached _lastRawGeometry.SourceObjectId. Both the
+            // subscription and the timer are released in Dispose so a
+            // panel close + re-open doesn't stack handlers or fire on
+            // a disposed timer.
             _rebuildDebounce = new UITimer { Interval = 0.5 };
             _rebuildDebounce.Elapsed += OnRebuildDebounceElapsed;
             RhinoDoc.ReplaceRhinoObject += OnRhinoObjectReplaced;
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                RhinoDoc.ReplaceRhinoObject -= OnRhinoObjectReplaced;
+                if (_rebuildDebounce != null)
+                {
+                    _rebuildDebounce.Elapsed -= OnRebuildDebounceElapsed;
+                    _rebuildDebounce.Dispose();
+                    _rebuildDebounce = null;
+                }
+            }
+            base.Dispose(disposing);
         }
 
         private void BuildUI()
@@ -208,9 +224,9 @@ namespace CCL_Clay3DP.UI
             SetStatus("Settings saved");
 
             // After a settings change, any previously generated output is
-            // stale (was computed with the old settings). Slice 2e policy:
-            // wipe and regenerate via the full pipeline — same code path
-            // as the Slice button — so shrinkage compensation, build-volume
+            // stale (was computed with the old settings). Policy: wipe
+            // and regenerate via the full pipeline — same code path as
+            // the Slice button — so shrinkage compensation, build-volume
             // checks, etc., all re-apply with the new settings.
             //
             // Exception: Layer Slice + Outer Wall Bracing prompts the user
@@ -389,9 +405,9 @@ namespace CCL_Clay3DP.UI
             }
 
             // Everything else — gates, transforms, checks, slice, bake —
-            // lives in RunPipeline so the OnSettingsClick auto-rebuild
-            // path (Slice 2e) can re-run the same logic against the
-            // cached _lastRawGeometry.
+            // lives in RunPipeline so the auto-rebuild paths (settings
+            // change, source-geometry transform) can re-run the same
+            // logic against the cached _lastRawGeometry.
             RunPipeline(selection);
         }
 
@@ -414,14 +430,14 @@ namespace CCL_Clay3DP.UI
         ///      about Point3d.Origin, which coincides with the part
         ///      footprint centroid on Z=0 after auto-translate).
         ///   7. Bake PrintPositionMarker + BuildVolume wireframes.
-        ///   8. Pre-slice build-volume check + popup (Slice 2d).
+        ///   8. Pre-slice build-volume check + popup.
         ///   9. Run the slice (Spiral or Layer mode).
         ///  10. Post-slice build-volume check + popup + Send-block flag.
         /// </summary>
         private void RunPipeline(GeometrySelection selection)
         {
-            // 0) Physical-feasibility gate (Slice 5a). A layer height
-            // larger than the bead diameter means the extruder is asked
+            // 0) Physical-feasibility gate. A layer height larger than
+            // the bead diameter means the extruder is asked
             // to span a vertical gap larger than the bead's own
             // diameter — the bead would float in mid-air and not bond
             // to the previous layer. Reject early; user must adjust
@@ -453,7 +469,6 @@ namespace CCL_Clay3DP.UI
                 && _settings.Helix.OuterWallBracing
                 && !GeometryCurvature.IsRuled(selection))
             {
-                // No parent → centered on screen, not on the docked panel.
                 MessageBox.Show(
                     "Outer Wall Bracing requires ruled / extruded geometry "
                     + "(cylinders, prisms, cones, planar extrusions). The "
@@ -480,9 +495,9 @@ namespace CCL_Clay3DP.UI
 
             // 4) Auto-translate to origin (idempotent for already-at-
             // origin geometry). Mirrors PrusaSlicer / Cura behavior;
-            // the move is undoable with Ctrl+Z. The suppress flag
-            // (Slice 2f) keeps our own transform from re-triggering
-            // the geometry-change auto-rebuild handler.
+            // the move is undoable with Ctrl+Z. The suppress flag keeps
+            // our own transform from re-triggering the geometry-change
+            // auto-rebuild handler (would otherwise infinite-loop).
             double translationDistance;
             var translation = ComputePrintingTranslation(
                 selection, out translationDistance);
@@ -1210,13 +1225,12 @@ namespace CCL_Clay3DP.UI
 
         private void OnSendToRoboDKClick(object sender, EventArgs e)
         {
-            // Hard block (Slice 2d): the most recent slice's toolpath
-            // exceeds the configured build volume. Sending would crash
-            // the robot. User must re-slice with the issue resolved
-            // (move part, shrink build volume, lower shrinkage %, etc.).
+            // Hard block: the most recent slice's toolpath exceeds the
+            // configured build volume. Sending would crash the robot.
+            // User must re-slice with the issue resolved (move part,
+            // shrink build volume, lower shrinkage %, etc.).
             if (_lastSliceOutOfBounds)
             {
-                // No parent → centered on screen, not on the docked panel.
                 MessageBox.Show(
                     "The last slice's toolpath extends past the build " +
                     "volume — sending it to RoboDK would crash the robot.\n\n" +
@@ -1322,7 +1336,6 @@ namespace CCL_Clay3DP.UI
 
         private bool ConfirmReplaceRoboDKSession()
         {
-            // No parent → centered on screen, not on the docked panel.
             var result = MessageBox.Show(
                 "RoboDK appears to already be running.\n\n" +
                 "Sending will reload the station template from disk, which " +
@@ -1345,7 +1358,6 @@ namespace CCL_Clay3DP.UI
         /// </summary>
         private void WarnRoboDKStaleAfterSettingsChange()
         {
-            // No parent → centered on screen, not on the docked panel.
             MessageBox.Show(
                 "Settings changed and the previous Rhino toolpath was cleared, " +
                 "but the RoboDK session still holds the toolpath from the " +
@@ -1760,9 +1772,9 @@ namespace CCL_Clay3DP.UI
                     SetStatus("Layer height must be > 0 in Toolpath settings");
                     return;
                 }
-                // Same physical-feasibility gate as RunPipeline (Slice 5a) —
-                // preview can be invoked on stale toolpath layers without
-                // re-slicing, so we re-check here too.
+                // Same physical-feasibility gate as RunPipeline — preview
+                // can be invoked on stale toolpath layers without re-
+                // slicing, so we re-check here too.
                 if (layerHeight > diameter + 1e-6)
                 {
                     MessageBox.Show(
@@ -1776,22 +1788,20 @@ namespace CCL_Clay3DP.UI
                     return;
                 }
 
-                // Cross-section dimensions (Slice 5c). Layer height squashes
-                // the bead vertically; mass / cross-section-area conservation
-                // means it spreads horizontally:
+                // Cross-section dimensions. Layer height squashes the bead
+                // vertically; mass / cross-section-area conservation means
+                // it spreads horizontally:
                 //   π × (D/2)²  =  π × (W/2) × (H/2)
                 //   →  W  =  D² / H
                 // When H == D the bead stays circular (W = D); when H < D
                 // it widens into an ellipse with minor axis vertical.
-                double radius = diameter * 0.5;
-                double widthRadius;
-                double heightRadius;
+                double widthRadius, heightRadius;
                 if (Math.Abs(layerHeight - diameter) < 1e-6)
                 {
                     // Circle — preserved exactly so the existing optimised
                     // CreateFromCurvePipe path is used.
-                    widthRadius  = radius;
-                    heightRadius = radius;
+                    widthRadius  = diameter * 0.5;
+                    heightRadius = diameter * 0.5;
                 }
                 else
                 {
@@ -1802,8 +1812,8 @@ namespace CCL_Clay3DP.UI
 
                 // Source layers: covers every mode that produces a toolpath
                 // curve. Spiral mode emits one curve on Spiral Toolpath;
-                // Layer / Layer+Bracing modes emit up to three. Slice 5b
-                // adds Skirt + Base layers so the preview shows the full
+                // Layer / Layer+Bracing modes emit up to three. Skirt and
+                // Base layers are included so the preview shows the full
                 // print stack — what the robot actually deposits — not
                 // just the part body.
                 var sourceLayerNames = new[]
@@ -1844,7 +1854,6 @@ namespace CCL_Clay3DP.UI
 
                 // Warn before starting — generation can take a while on dense
                 // stacks and users were getting spooked by the hang.
-                // No parent → centered on screen, not on the docked panel.
                 string crossSectionMsg = elliptical
                     ? $"elliptical bead {widthRadius * 2.0:F2} × {heightRadius * 2.0:F2} mm " +
                       $"(area-conserved from {diameter:F2} mm round @ {layerHeight:F2} mm layer)"
@@ -1920,9 +1929,10 @@ namespace CCL_Clay3DP.UI
                     {
                         if (elliptical)
                         {
-                            // Slice 5c — manual elliptical sweep so the
-                            // cross-section can have a different vertical
-                            // (height) and horizontal (width) extent.
+                            // Manual elliptical sweep so the cross-section
+                            // can have a different vertical (height) and
+                            // horizontal (width) extent — Rhino's
+                            // CreateFromCurvePipe is circular-only.
                             tube = BuildEllipticalTube(
                                 pipeInput, widthRadius, heightRadius, 12);
                         }
@@ -1966,28 +1976,7 @@ namespace CCL_Clay3DP.UI
                         int stride = Math.Max(1, (last + maxSpheres - 1) / maxSpheres);
                         for (int k = 0; k < last; k += stride)
                         {
-                            Mesh fillerMesh;
-                            if (elliptical)
-                            {
-                                // Match the ellipse cross-section: sphere
-                                // scaled non-uniformly (W,W,H) so the gap
-                                // filler reads as the same bead shape as
-                                // the tube.
-                                fillerMesh = Mesh.CreateFromSphere(
-                                    new Sphere(Point3d.Origin, 1.0), 8, 6);
-                                if (fillerMesh != null)
-                                {
-                                    fillerMesh.Transform(Transform.Scale(
-                                        Plane.WorldXY,
-                                        widthRadius, widthRadius, heightRadius));
-                                    fillerMesh.Translate(pl[k] - Point3d.Origin);
-                                }
-                            }
-                            else
-                            {
-                                fillerMesh = Mesh.CreateFromSphere(
-                                    new Sphere(pl[k], widthRadius), 8, 6);
-                            }
+                            var fillerMesh = MakeBeadFiller(pl[k], widthRadius, heightRadius);
                             if (fillerMesh != null && fillerMesh.IsValid)
                                 doc.Objects.AddMesh(fillerMesh, attrs);
                         }
@@ -2081,9 +2070,9 @@ namespace CCL_Clay3DP.UI
         }
 
         /// <summary>
-        /// Build a tube mesh of elliptical cross-section along a polyline
-        /// (Slice 5c). The ellipse's vertical (Z) semi-axis is fixed in
-        /// world Z; the horizontal semi-axis lies in the XY plane,
+        /// Build a tube mesh of elliptical cross-section along a polyline.
+        /// The ellipse's vertical (Z) semi-axis is fixed in world Z; the
+        /// horizontal semi-axis lies in the XY plane,
         /// perpendicular to the local curve tangent. This matches the
         /// physical reality of a clay bead squashed by the build plate
         /// or previous layer:
@@ -2099,6 +2088,28 @@ namespace CCL_Clay3DP.UI
         /// infill zigzags) get fan-triangulated end caps so the tube
         /// reads as solid.
         /// </summary>
+        /// <summary>
+        /// Build a single bead-shaped filler mesh at <paramref name="centre"/>
+        /// matching the cross-section of the surrounding tube. When the
+        /// cross-section is circular (widthRadius == heightRadius) this is
+        /// just a sphere; otherwise it's a unit sphere scaled non-uniformly
+        /// to (W, W, H). Used to fill miter gaps at polyline vertices in
+        /// the Preview Clay Model bake.
+        /// </summary>
+        private static Mesh MakeBeadFiller(
+            Point3d centre, double widthRadius, double heightRadius)
+        {
+            if (Math.Abs(widthRadius - heightRadius) < 1e-6)
+                return Mesh.CreateFromSphere(new Sphere(centre, widthRadius), 8, 6);
+
+            var m = Mesh.CreateFromSphere(new Sphere(Point3d.Origin, 1.0), 8, 6);
+            if (m == null) return null;
+            m.Transform(Transform.Scale(
+                Plane.WorldXY, widthRadius, widthRadius, heightRadius));
+            m.Translate(centre - Point3d.Origin);
+            return m;
+        }
+
         private static Mesh BuildEllipticalTube(
             Curve curve,
             double widthRadius,
@@ -2236,7 +2247,7 @@ namespace CCL_Clay3DP.UI
         }
 
         // ---------------------------------------------------------------
-        // Build-volume overflow popups (Slice 2d).
+        // Build-volume overflow popups.
         //
         // Pre-slice variant: actionable — user can Cancel (abort the slice
         // before any cycles are spent) or Continue Anyway (proceed to slice
@@ -2412,6 +2423,13 @@ namespace CCL_Clay3DP.UI
         /// to PrimaryScreen if Mouse.Position isn't on any known screen.
         /// Defensive: any layout math failure just leaves the dialog at
         /// its default location rather than blocking the popup.
+        ///
+        /// Convention for ALL panel-originated popups: never anchor to
+        /// the docked panel — when it's narrow or against a screen edge
+        /// the popup gets clipped. For custom Dialog&lt;T&gt;, call this
+        /// helper before ShowModal() (no parent). For MessageBox.Show,
+        /// drop the parent argument — the OS-default placement on
+        /// Windows centres it on screen for parentless calls.
         /// </summary>
         private static void CenterOnActiveScreen(Window dlg)
         {
@@ -2439,8 +2457,8 @@ namespace CCL_Clay3DP.UI
         }
 
         // ---------------------------------------------------------------
-        // Slice 2f — auto-rebuild when the source geometry is transformed
-        // in the Rhino doc (move, scale, rotate, gumball drag, etc.).
+        // Auto-rebuild when the source geometry is transformed in the
+        // Rhino doc (move, scale, rotate, gumball drag, etc.).
         //
         // RhinoDoc.ReplaceRhinoObject fires synchronously on every
         // object modification, including all transforms. The handler
@@ -2453,8 +2471,8 @@ namespace CCL_Clay3DP.UI
         // Skip cases:
         //   - No cached geometry yet (user hasn't sliced once)
         //   - Layer + Bracing combo (interactive prompts make auto-
-        //     rebuild on every drag intolerable — same fallback as
-        //     Slice 2e settings-change rebuild)
+        //     rebuild on every drag intolerable — same fallback as the
+        //     settings-change rebuild)
         // ---------------------------------------------------------------
 
         private void OnRhinoObjectReplaced(object sender, RhinoReplaceObjectEventArgs e)
@@ -2477,7 +2495,7 @@ namespace CCL_Clay3DP.UI
 
             // Layer + Bracing combo prompts mid-slice; auto-rebuilding
             // on every geometry edit would spam those prompts. Same
-            // fallback policy as the Slice 2e settings-change rebuild.
+            // fallback policy as the settings-change rebuild.
             bool layerBracing = !_settings.Helix.SpiralSlice
                 && _settings.Helix.OuterWallBracing;
             if (layerBracing)
