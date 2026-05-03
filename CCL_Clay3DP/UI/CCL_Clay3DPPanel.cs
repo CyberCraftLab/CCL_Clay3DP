@@ -44,6 +44,22 @@ namespace CCL_Clay3DP.UI
         // overwrite the panel's status with their own progress messages.
         private string _lastTranslationNote;
 
+        // Set true when the post-slice toolpath exceeds the configured
+        // build volume on any axis. OnSendToRoboDKClick checks this to
+        // block sends that would crash the robot. Reset to false at the
+        // top of every RunPipeline so each run is judged fresh.
+        private bool _lastSliceOutOfBounds = false;
+
+        // Post-auto-translate, PRE-shrinkage cached selection. Used by
+        // OnSettingsClick's auto-rebuild path (Slice 2e) so a settings
+        // change re-runs the full pipeline (shrinkage scale + checks +
+        // slice) on the same geometry without re-prompting the user
+        // to pick it. Distinct from _lastGeometry, which the runners
+        // overwrite with the post-shrinkage scaled selection (used by
+        // the heatmap analyzer). Re-applying shrinkage to an already-
+        // scaled selection would compound the scale, hence the split.
+        private GeometrySelection _lastRawGeometry;
+
 
         // Workflow controls disabled until the user reviews Settings at least
         // once in this session. Avoids users clicking Slice with stale or
@@ -152,7 +168,9 @@ namespace CCL_Clay3DP.UI
         private void OnSettingsClick(object sender, EventArgs e)
         {
             var dialog = new SettingsDialog(_settings);
-            if (!dialog.ShowModal(this)) return;
+            // ShowModal() with no parent centers on the screen rather than
+            // on the docked panel.
+            if (!dialog.ShowModal()) return;
 
             _settings = SettingsManager.Load();
 
@@ -165,47 +183,53 @@ namespace CCL_Clay3DP.UI
 
             SetStatus("Settings saved");
 
-            // After a settings change, any previously generated spiral /
-            // ribbon / heatmap geometry — and the cached slice result used
-            // by Send to RoboDK — were computed with the OLD settings and
-            // are now stale. Clear the generated layers unconditionally,
-            // then auto-rebuild from the same geometry if we still have a
-            // reference to it. This avoids the easy-to-miss "remember to
-            // re-run Spiral Slice" failure mode.
+            // After a settings change, any previously generated output is
+            // stale (was computed with the old settings). Slice 2e policy:
+            // wipe and regenerate via the full pipeline — same code path
+            // as the Slice button — so shrinkage compensation, build-volume
+            // checks, etc., all re-apply with the new settings.
+            //
+            // Exception: Layer Slice + Outer Wall Bracing prompts the user
+            // mid-run for flip direction + offset distance. Spamming those
+            // prompts on every unrelated settings change is annoying, so
+            // we leave that combo for the user to kick off with Slice.
             var doc = RhinoDoc.ActiveDoc;
             if (doc == null) return;
+
+            // Always re-bake the build-volume wireframe so a Build Volume
+            // settings change is visible even when there's nothing to
+            // regenerate.
+            BakeBuildVolume(doc, _settings.BuildVolume);
+
             if (!HasGeneratedContent(doc)) return;
 
-            var geometryToRebuild = _lastGeometry;
-            ClearGeneratedContent(doc);
-            _lastResult = null;
-            _lastGeometry = null;
+            bool layerBracing = !_settings.Helix.SpiralSlice
+                && _settings.Helix.OuterWallBracing;
 
-            if (geometryToRebuild != null && _settings.Helix.SpiralSlice)
+            if (_lastRawGeometry != null && !layerBracing)
             {
-                // Auto-rebuild only makes sense for Spiral Slice — the Layer
-                // Slice flow can be interactive (flip + distance prompts when
-                // Outer Wall Bracing is on), so we leave it for the user to
-                // kick off with the Slice button.
-                SetStatus("Settings changed — regenerating spiral...");
+                // Auto-rebuild via the full pipeline. The geometry is
+                // already at origin from the previous slice, so the
+                // pipeline's auto-translate is a no-op and the status
+                // line reads "Geometry already at origin · scaled +X% …".
+                SetStatus("Settings changed — regenerating...");
                 RhinoApp.Wait();
-                RunSliceAndBake(geometryToRebuild);
+                RunPipeline(_lastRawGeometry);
             }
             else
             {
-                SetStatus("Generated layers cleared — click Slice to regenerate");
+                // Either the user has not done a slice yet (no cached
+                // geometry) or we're in the Layer+Bracing combo. Clear
+                // the stale output, re-bake the marker if we still have
+                // a reference, and tell the user to click Slice.
+                ClearGeneratedContent(doc);
+                _lastResult = null;
+                if (_lastRawGeometry != null)
+                    BakePrintPositionMarker(doc, _lastRawGeometry);
+                SetStatus(layerBracing
+                    ? "Settings changed — click Slice to regenerate (Layer + Bracing needs interactive prompts)"
+                    : "Generated layers cleared — click Slice to regenerate");
             }
-
-            // Re-bake the visual markers regardless of whether we did an
-            // auto-slice. ClearGeneratedContent above wiped them along
-            // with the slice content; without these calls they would
-            // stay gone until the next manual Slice click. Build Volume
-            // depends only on settings (so it's always safe to re-bake);
-            // Print Position depends on the last selected geometry, so
-            // it's only re-baked when we still have a reference to it.
-            BakeBuildVolume(doc, _settings.BuildVolume);
-            if (geometryToRebuild != null)
-                BakePrintPositionMarker(doc, geometryToRebuild);
 
             // RoboDK is never re-launched / re-sent automatically — that
             // is reserved for the explicit "Send to RoboDK" button (and
@@ -340,16 +364,49 @@ namespace CCL_Clay3DP.UI
                 return;
             }
 
-            // Outer Wall Bracing gate — bracing's per-layer DivideByCount
-            // + seam-align algorithm only behaves on ruled / extrudable
-            // geometry. On free-form (sphere, organic Brep) the seam
-            // wanders between layers and the bracing twists into junk.
-            // Reject before mutating anything (no clear, no translate).
+            // Everything else — gates, transforms, checks, slice, bake —
+            // lives in RunPipeline so the OnSettingsClick auto-rebuild
+            // path (Slice 2e) can re-run the same logic against the
+            // cached _lastRawGeometry.
+            RunPipeline(selection);
+        }
+
+        /// <summary>
+        /// The full slice pipeline. Called from OnSliceClick (after a
+        /// fresh user pick) and from OnSettingsClick's auto-rebuild
+        /// branch (with the cached _lastRawGeometry).
+        ///
+        /// Steps, in order:
+        ///   1. Outer Wall Bracing gate (free-form rejection — early so
+        ///      we don't mutate the doc on a doomed run).
+        ///   2. Reset _lastSliceOutOfBounds (every run is judged fresh).
+        ///   3. Clear any previously generated output + cached result.
+        ///   4. Auto-translate to world origin (PrusaSlicer convention).
+        ///      Idempotent — already-at-origin geometry is a no-op.
+        ///   5. Cache the post-translate selection in _lastRawGeometry
+        ///      (pre-shrinkage — re-applying shrinkage to an already-
+        ///      scaled selection would compound the scale).
+        ///   6. Apply shrinkage compensation if enabled (uniform XYZ
+        ///      about Point3d.Origin, which coincides with the part
+        ///      footprint centroid on Z=0 after auto-translate).
+        ///   7. Bake PrintPositionMarker + BuildVolume wireframes.
+        ///   8. Pre-slice build-volume check + popup (Slice 2d).
+        ///   9. Run the slice (Spiral or Layer mode).
+        ///  10. Post-slice build-volume check + popup + Send-block flag.
+        /// </summary>
+        private void RunPipeline(GeometrySelection selection)
+        {
+            // 1) Outer Wall Bracing gate — bracing's per-layer
+            // DivideByCount + seam-align algorithm only behaves on ruled
+            // / extrudable geometry. On free-form (sphere, organic Brep)
+            // the seam wanders between layers and the bracing twists
+            // into junk. Reject before mutating anything.
             if (!_settings.Helix.SpiralSlice
                 && _settings.Helix.OuterWallBracing
                 && !GeometryCurvature.IsRuled(selection))
             {
-                MessageBox.Show(this,
+                // No parent → centered on screen, not on the docked panel.
+                MessageBox.Show(
                     "Outer Wall Bracing requires ruled / extruded geometry "
                     + "(cylinders, prisms, cones, planar extrusions). The "
                     + "selected part is free-form (has curvature in more "
@@ -362,9 +419,10 @@ namespace CCL_Clay3DP.UI
                 return;
             }
 
-            // Clean slate: remove any generated output from a previous run
-            // (including output from the OTHER mode) so what's in Rhino
-            // always reflects the current Settings choice.
+            // 2) Reset Send-block gate.
+            _lastSliceOutOfBounds = false;
+
+            // 3) Clean slate.
             var doc = RhinoDoc.ActiveDoc;
             if (doc != null)
             {
@@ -372,14 +430,9 @@ namespace CCL_Clay3DP.UI
                 _lastResult = null;
             }
 
-            // Auto-translate the selection to world origin so the model,
-            // the toolpath, and the build-volume box all share the same
-            // frame of reference (commercial-slicer convention). The
-            // user's original Rhino object physically moves — this is
-            // intentional, matches PrusaSlicer / Cura / Bambu Studio
-            // behavior, and the move is undoable with Ctrl+Z. Subsequent
-            // slices on the same object are no-ops since the bbox
-            // bottom-center is already at origin.
+            // 4) Auto-translate to origin (idempotent for already-at-
+            // origin geometry). Mirrors PrusaSlicer / Cura behavior;
+            // the move is undoable with Ctrl+Z.
             double translationDistance;
             var translation = ComputePrintingTranslation(
                 selection, out translationDistance);
@@ -389,19 +442,14 @@ namespace CCL_Clay3DP.UI
                 doc.Objects.Transform(
                     selection.SourceObjectId, translation, true);
             }
-            // Match the in-memory Brep/Mesh copy to the doc state so the
-            // slicer operates on geometry at the origin.
             var printingSelection = ApplyTransform(selection, translation);
 
-            // Shrinkage compensation (Slice 2b) — uniform XYZ scale about
-            // world origin, which after the auto-translate above coincides
-            // with the part footprint centroid on Z=0. Applied AFTER the
-            // translate so the scale center is correct, and BEFORE the
-            // marker / build-volume bake and the slice runners so every
-            // downstream consumer (printability analyzer, build-volume
-            // check, slicer) sees the scaled geometry. The user's source
-            // Rhino object is left at design size — only the in-memory
-            // copy used by the slicer grows.
+            // 5) Cache the post-translate, pre-shrinkage selection so
+            // OnSettingsClick can auto-rebuild without re-prompting.
+            _lastRawGeometry = printingSelection;
+
+            // 6) Shrinkage compensation. The user's source Rhino object
+            // stays at design size; only this in-memory copy grows.
             double shrinkageScaleApplied = 1.0;
             if (_settings.Clay.EnableShrinkageCompensation
                 && _settings.Clay.ShrinkagePercent > 0.0
@@ -414,6 +462,8 @@ namespace CCL_Clay3DP.UI
                 printingSelection = ApplyTransform(printingSelection, shrinkageScale);
             }
 
+            // 7) Bake markers (build volume bake also surfaces any
+            // build-volume settings change immediately).
             if (doc != null)
             {
                 BakePrintPositionMarker(doc, printingSelection);
@@ -433,10 +483,40 @@ namespace CCL_Clay3DP.UI
             _lastTranslationNote = translationMsg;
             SetStatus(translationMsg);
 
+            // 8) Pre-slice build-volume check (fast fail on geometry
+            // bbox; post-slice check uses the actual toolpath).
+            var geomBbox = BuildVolumeCheck.SelectionBoundingBox(printingSelection);
+            var preOverflow = BuildVolumeCheck.Check(geomBbox, _settings.BuildVolume);
+            if (preOverflow.HasOverflow)
+            {
+                if (!ConfirmPreSliceBuildVolumeOverflow(preOverflow))
+                {
+                    SetStatus("Slice cancelled — geometry exceeds build volume");
+                    return;
+                }
+            }
+
+            // 9) Run slice.
             if (_settings.Helix.SpiralSlice)
                 RunSliceAndBake(printingSelection);
             else
                 RunLayerSlice(printingSelection);
+
+            // 10) Post-slice build-volume check. Authoritative — uses
+            // the full frame stream (skirt + base + part). On overflow,
+            // popup + arm Send-block flag. Slice stays baked so user
+            // can see exactly where it overflows.
+            if (_lastResult != null && _lastResult.Frames.Count > 0)
+            {
+                var pathBbox = BuildVolumeCheck.FrameStreamBoundingBox(_lastResult);
+                var postOverflow = BuildVolumeCheck.Check(pathBbox, _settings.BuildVolume);
+                if (postOverflow.HasOverflow)
+                {
+                    _lastSliceOutOfBounds = true;
+                    NotifyPostSliceBuildVolumeOverflow(postOverflow);
+                    SetStatus("Toolpath exceeds build volume — Send to RoboDK blocked");
+                }
+            }
         }
 
         private void RunSliceAndBake(GeometrySelection selection)
@@ -1072,6 +1152,24 @@ namespace CCL_Clay3DP.UI
 
         private void OnSendToRoboDKClick(object sender, EventArgs e)
         {
+            // Hard block (Slice 2d): the most recent slice's toolpath
+            // exceeds the configured build volume. Sending would crash
+            // the robot. User must re-slice with the issue resolved
+            // (move part, shrink build volume, lower shrinkage %, etc.).
+            if (_lastSliceOutOfBounds)
+            {
+                // No parent → centered on screen, not on the docked panel.
+                MessageBox.Show(
+                    "The last slice's toolpath extends past the build " +
+                    "volume — sending it to RoboDK would crash the robot.\n\n" +
+                    "Adjust the part position, build volume, or shrinkage % " +
+                    "in Settings, then run Slice again.",
+                    "Send blocked — toolpath out of bounds",
+                    MessageBoxButtons.OK, MessageBoxType.Warning);
+                SetStatus("Send to RoboDK blocked — toolpath out of bounds");
+                return;
+            }
+
             // Warn if a RoboDK session is already running. Each Send reloads
             // the station template from disk, discarding any manual edits the
             // user has made in RoboDK. Fail-safe: if we can't enumerate
@@ -1166,8 +1264,8 @@ namespace CCL_Clay3DP.UI
 
         private bool ConfirmReplaceRoboDKSession()
         {
+            // No parent → centered on screen, not on the docked panel.
             var result = MessageBox.Show(
-                this,
                 "RoboDK appears to already be running.\n\n" +
                 "Sending will reload the station template from disk, which " +
                 "discards any manual changes you may have made in RoboDK " +
@@ -1189,8 +1287,8 @@ namespace CCL_Clay3DP.UI
         /// </summary>
         private void WarnRoboDKStaleAfterSettingsChange()
         {
+            // No parent → centered on screen, not on the docked panel.
             MessageBox.Show(
-                this,
                 "Settings changed and the previous Rhino toolpath was cleared, " +
                 "but the RoboDK session still holds the toolpath from the " +
                 "previous Send.\n\n" +
@@ -1639,8 +1737,8 @@ namespace CCL_Clay3DP.UI
 
                 // Warn before starting — generation can take a while on dense
                 // stacks and users were getting spooked by the hang.
+                // No parent → centered on screen, not on the docked panel.
                 var confirm = MessageBox.Show(
-                    this,
                     $"About to build the clay model preview from {curves.Count} " +
                     $"toolpath curves at {diameter:F2} mm bead diameter.\n\n" +
                     "This can take a few moments on dense geometry. Continue?",
@@ -1847,8 +1945,217 @@ namespace CCL_Clay3DP.UI
             // is populated for Spiral and both Layer variants.
             if (_lastResult == null || _lastResult.Frames.Count == 0) return;
 
+            // Short-circuit when the slice is out of bounds: Send would
+            // be blocked anyway, and Analyze on a path the user can't
+            // print just wastes their time. The post-slice popup has
+            // already informed them; the panel status reflects it.
+            if (_lastSliceOutOfBounds) return;
+
             OnAnalyzeClick(sender, e);
             OnSendToRoboDKClick(sender, e);
+        }
+
+        // ---------------------------------------------------------------
+        // Build-volume overflow popups (Slice 2d).
+        //
+        // Pre-slice variant: actionable — user can Cancel (abort the slice
+        // before any cycles are spent) or Continue Anyway (proceed to slice
+        // and let the post-slice check have the final word).
+        //
+        // Post-slice variant: informational — the slice and bake have
+        // already happened. The user can inspect the toolpath in Rhino
+        // to see exactly where it overflows, but Send-to-RoboDK is hard-
+        // blocked by _lastSliceOutOfBounds until they re-slice with the
+        // issue resolved. So a single OK button is the only useful action.
+        // ---------------------------------------------------------------
+
+        private bool ConfirmPreSliceBuildVolumeOverflow(BuildVolumeCheck.Overflow ov)
+        {
+            return ShowBuildVolumeOverflowDialog(
+                bodyIntro:
+                    "The selected geometry (after auto-translate and " +
+                    "shrinkage compensation, if enabled) extends past the " +
+                    "configured build volume:",
+                overflow: ov,
+                bodyOutro:
+                    "Slicing will produce a toolpath that won't fit. Send " +
+                    "to RoboDK will be blocked even if you continue.\n\n" +
+                    "Adjust the build volume, the part position, or the " +
+                    "shrinkage % to fix.",
+                offerContinue: true);
+        }
+
+        private void NotifyPostSliceBuildVolumeOverflow(BuildVolumeCheck.Overflow ov)
+        {
+            ShowBuildVolumeOverflowDialog(
+                bodyIntro:
+                    "The completed toolpath (skirt + base + part) extends " +
+                    "past the configured build volume:",
+                overflow: ov,
+                bodyOutro:
+                    "The slice has been baked so you can inspect where it " +
+                    "overflows in Rhino, but Send to RoboDK is blocked — " +
+                    "the robot would crash. Re-slice after adjusting the " +
+                    "build volume, the part position, or the shrinkage %.",
+                offerContinue: false);
+        }
+
+        /// <summary>
+        /// Shared modal warning dialog. Red bold "W A R N I N G !" header,
+        /// the per-axis overflow description in monospace, and either
+        /// {Cancel, Continue Anyway} (offerContinue=true, returns true on
+        /// continue) or just {OK} (offerContinue=false, always returns true).
+        /// </summary>
+        private bool ShowBuildVolumeOverflowDialog(
+            string bodyIntro,
+            BuildVolumeCheck.Overflow overflow,
+            string bodyOutro,
+            bool offerContinue)
+        {
+            // Layout strategy:
+            //   - Set explicit Width on the wrap-mode labels so they wrap
+            //     at a known width (no monitor-wide blowup from long
+            //     single-line text).
+            //   - Set an explicit Size that fits the worst-case content
+            //     (4-axis overflow + longest outro) plus the button row.
+            //     Auto-height didn't reliably fit the buttons on Windows
+            //     with the wrapped labels — they got clipped at the bottom.
+            //   - Resizable=false so the size is exact.
+            const int LabelWrapWidth = 400;
+
+            var dlg = new Dialog<bool>
+            {
+                Title = "CCL_Clay3DP — Build volume exceeded",
+                // 400 fits the worst case (4-axis overflow + longest
+                // outro + button row + padding) with the null soaker
+                // keeping buttons at natural height.
+                Size = new Size(460, 400),
+                Resizable = false,
+            };
+
+            var headerLabel = new Label
+            {
+                Text = "W A R N I N G !",
+                TextColor = Colors.Red,
+                // Fully qualify Font — Rhino.DocObjects.Font and
+                // Eto.Drawing.Font are both in scope from the file's
+                // using directives.
+                Font = new Eto.Drawing.Font(SystemFont.Bold, 16),
+                TextAlignment = TextAlignment.Center,
+            };
+
+            var introLabel = new Label
+            {
+                Text = bodyIntro,
+                Wrap = WrapMode.Word,
+                Width = LabelWrapWidth,
+            };
+
+            var overflowLabel = new Label
+            {
+                Text = overflow.Describe(),
+                Font = new Eto.Drawing.Font(FontFamilies.Monospace, 10),
+            };
+
+            var outroLabel = new Label
+            {
+                Text = bodyOutro,
+                Wrap = WrapMode.Word,
+                Width = LabelWrapWidth,
+            };
+
+            TableLayout buttonRow;
+            if (offerContinue)
+            {
+                var continueBtn = new Button { Text = "Continue anyway" };
+                continueBtn.Click += (s, e) => dlg.Close(true);
+                var cancelBtn = new Button { Text = "Cancel" };
+                cancelBtn.Click += (s, e) => dlg.Close(false);
+
+                dlg.DefaultButton = cancelBtn;  // safe default — Enter cancels
+                dlg.AbortButton = cancelBtn;    // Esc cancels
+
+                buttonRow = new TableLayout
+                {
+                    Spacing = new Size(8, 0),
+                    Rows = { new TableRow(null, cancelBtn, continueBtn) },
+                };
+            }
+            else
+            {
+                var okBtn = new Button { Text = "OK" };
+                okBtn.Click += (s, e) => dlg.Close(true);
+
+                dlg.DefaultButton = okBtn;
+                dlg.AbortButton = okBtn;
+
+                buttonRow = new TableLayout
+                {
+                    Spacing = new Size(8, 0),
+                    Rows = { new TableRow(null, okBtn) },
+                };
+            }
+
+            // Layout note: Eto's TableLayout scales the LAST non-null
+            // row vertically by default — without the null spacer, the
+            // button row absorbed all leftover space and the buttons
+            // ballooned to ~100px tall. The null row sits between the
+            // outro and the buttons so it eats the slack instead, and
+            // buttons stay at their natural height.
+            dlg.Content = new TableLayout
+            {
+                Spacing = new Size(0, 12),
+                Padding = new Padding(20),
+                Rows =
+                {
+                    new TableRow(headerLabel),
+                    new TableRow(introLabel),
+                    new TableRow(overflowLabel),
+                    new TableRow(outroLabel),
+                    null, // soak leftover vertical space
+                    new TableRow(buttonRow),
+                },
+            };
+
+            // ShowModal() alone does NOT center on the screen — Eto on
+            // Windows lets the OS use a default placement (typically near
+            // the parent app's top-left). We compute the centered position
+            // explicitly from the active screen's bounds.
+            CenterOnActiveScreen(dlg);
+            return dlg.ShowModal();
+        }
+
+        /// <summary>
+        /// Position a window at the centre of whichever screen the mouse
+        /// cursor is currently on (so multi-monitor users get the dialog
+        /// where they're looking, not on the primary display). Falls back
+        /// to PrimaryScreen if Mouse.Position isn't on any known screen.
+        /// Defensive: any layout math failure just leaves the dialog at
+        /// its default location rather than blocking the popup.
+        /// </summary>
+        private static void CenterOnActiveScreen(Window dlg)
+        {
+            try
+            {
+                Eto.Forms.Screen screen = null;
+                try { screen = Eto.Forms.Screen.FromPoint(Mouse.Position); }
+                catch { /* FromPoint not available on all platforms */ }
+                if (screen == null) screen = Eto.Forms.Screen.PrimaryScreen;
+                if (screen == null) return;
+
+                var bounds = screen.Bounds;
+                var size = dlg.Size;
+                // Fully qualify Point — Eto.Drawing.Point and
+                // Rhino.Geometry.Point both in scope from the file's
+                // using directives.
+                dlg.Location = new Eto.Drawing.Point(
+                    (int)(bounds.X + (bounds.Width - size.Width) / 2),
+                    (int)(bounds.Y + (bounds.Height - size.Height) / 2));
+            }
+            catch
+            {
+                // Centering is cosmetic — never let it throw.
+            }
         }
 
         private void SetStatus(string message)
