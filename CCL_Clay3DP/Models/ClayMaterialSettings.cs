@@ -25,6 +25,22 @@ namespace CCL_Clay3DP.Models
         public double MinLayerBondRatio { get; set; } = 0.5;
         public double MaterialDensity { get; set; } = 2.2;
 
+        // Water added during clay prep, as percentage of dry clay mass
+        // (additive — 6% = 60 g water per 1 kg dry clay, standard pottery
+        // convention). Recorded only in this slice; downstream behavior
+        // (nozzle recommendation, feed/spindle adjustment) wired in later
+        // slices once the 6/8/10/12% experiments produce a defensible curve.
+        public double WaterPercent { get; set; } = 0.0;
+
+        // Shrinkage compensation: when enabled, the slice pipeline scales
+        // the input geometry uniformly (X=Y=Z) by 1/(1 - ShrinkagePercent/100)
+        // about the part footprint centroid on Z=0, so the printed (and later
+        // shrunk) part lands at the user's intended size. ShrinkagePercent is
+        // total combined shrinkage (drying + firing) — typical stoneware
+        // 10-13%. Toggle off = no scaling, original behavior.
+        public bool EnableShrinkageCompensation { get; set; } = false;
+        public double ShrinkagePercent { get; set; } = 0.0;
+
         public ClayMaterialSettings Clone()
         {
             return new ClayMaterialSettings
@@ -34,6 +50,9 @@ namespace CCL_Clay3DP.Models
                 MaxOverhangAngle = MaxOverhangAngle,
                 MinLayerBondRatio = MinLayerBondRatio,
                 MaterialDensity = MaterialDensity,
+                WaterPercent = WaterPercent,
+                EnableShrinkageCompensation = EnableShrinkageCompensation,
+                ShrinkagePercent = ShrinkagePercent,
             };
         }
     }
