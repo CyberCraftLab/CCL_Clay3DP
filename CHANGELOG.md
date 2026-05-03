@@ -5,6 +5,99 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning is [Semantic](https://semver.org/) with an `-alpha` suffix
 while the plugin is pre-release.
 
+## [1.2.0-alpha] — 2026-05-03
+
+Settings UI redesign + Material section expansion + build-volume
+safety + automatic regeneration. Largest user-visible release since
+1.0; everything below was developed on the `settings-ui` branch
+across slices 1, 2a–2f, 3, and 5a–5c.
+
+### Added
+
+- **Landscape Settings dialog**. Reorganised from a tall single-
+  column scroll into a 3-column layout (Clay Material + Build
+  Volume / Tool + Nozzle + Toolpath / Robot + Extruder). Same
+  fields, less scrolling, sections match how the parameters
+  conceptually relate.
+- **Water % added** (Material section). Records the lab's mix
+  recipe — additive % of dry clay mass (6% = 60 g water per 1 kg
+  dry, standard pottery convention). Recorded only for now;
+  downstream behaviour (nozzle / feedrate recommendations) wired
+  in a later release once the lab's 6/8/10/12% experiments
+  produce a defensible curve.
+- **Shrinkage compensation** (Material section). Toggle + total
+  drying-plus-firing %, range 0–25. When enabled, the slice
+  pipeline scales input geometry uniformly (X = Y = Z) about
+  the part footprint centroid on Z = 0 by 1 / (1 − pct/100), so
+  the printed and later shrunk part lands at the modeled size.
+  Source Rhino object stays at design size; only the in-memory
+  copy used by the slicer grows. Status line shows the applied
+  scale (e.g. *"scaled +13.6% for 12.0% shrinkage compensation"*).
+- **Build-volume safety**. Two checks added to the slice path:
+  pre-slice on the post-translate, post-shrinkage geometry bbox
+  (cancellable popup) and post-slice on the full skirt + base +
+  part frame stream (informational popup). When the toolpath
+  exceeds the configured build volume, **Send to RoboDK is
+  hard-blocked** until you re-slice with the issue resolved
+  (move part, shrink build volume, lower shrinkage %).
+- **Automatic regeneration on settings change**. Closing the
+  Settings dialog re-runs the full slice pipeline against the
+  same geometry — no need to click Slice after tweaking shrinkage,
+  layer height, base count, etc. Layer + Outer Wall Bracing combo
+  is the only exception (it prompts mid-slice for flip + offset
+  distance); that case still asks you to click Slice.
+- **Automatic regeneration on geometry change**. Transforming the
+  source object in Rhino (move, scale, rotate, gumball drag) re-
+  runs the slice pipeline automatically, debounced 500 ms so a
+  continuous drag coalesces into one rebuild on release.
+- **Skirt and Base in Preview Clay Model**. The clay preview now
+  pipes the skirt and base layers along with the part body, so
+  what you see is the full clay deposition the robot will lay
+  down — not just the part.
+- **Elliptical pipe in Preview Clay Model**. When layer height is
+  less than bead diameter, the bead is squashed vertically and
+  spreads laterally; the preview now reflects this with an area-
+  conserved ellipse (W = D² / H, vertical axis = H). With
+  D = 2.5 mm and H = 1.8 mm, the piped bead becomes 3.47 × 1.8 mm.
+  When H = D the cross-section stays circular.
+- **`ARCHITECTURE.md`** at the repo root — eight Mermaid diagrams
+  + tables documenting folder map, panel buttons, slice pipeline,
+  send-to-RoboDK pipeline, settings flow, cached panel state,
+  "where to look when fixing X", and recent slice history.
+
+### Changed
+
+- **Build Volume schema simplified**. Five fields
+  (XMin/XMax/YMin/YMax/Height) collapsed to three (Width/Depth/
+  Height). The volume is now always centered on the world origin
+  in XY (build plate at world 0,0,0), matching what auto-translate
+  targets and how commercial slicers (PrusaSlicer, Cura) present
+  bed dimensions. Pre-1.2 settings.json files migrate
+  automatically on first load — Width = old XMax − XMin, Depth =
+  old YMax − YMin — and write the new schema on next Save. The
+  pipeline still has access to XMin/XMax/YMin/YMax via computed
+  read-only properties, so no downstream code needed editing.
+- **"Robot / Printer" → "Robot / Extruder"** in the Settings
+  dialog. Reflects what the section actually configures.
+- **Nozzle dropdown moved out of Robot section** into its own
+  "Tool / Nozzle" group. Placeholder for the planned nozzle-
+  parameter expansion (GitLab #12).
+- **All panel-originated popups now centered on the active
+  screen**. Previously anchored to the docked panel — when the
+  panel was narrow or on a screen edge, popups (build-volume
+  warning, Send-blocked, Outer Wall Bracing rejection,
+  Replace-RoboDK-session, RoboDK-stale, Preview Clay Model,
+  Settings dialog itself) clipped at the corner. Now they appear
+  mid-screen on whichever monitor your cursor is on.
+
+### Fixed
+
+- **Layer height > bead diameter** is now rejected with an
+  explanatory popup at slice time. Previously the slice ran and
+  produced toolpath that the extruder physically can't deposit
+  (the bead can't span a vertical gap larger than its own
+  diameter). Same gate fires on auto-regenerate paths.
+
 ## [1.1.1-alpha] — 2026-04-25
 
 Polish release rolling up GitLab issues #1, #2, #4, #5, #6, #7, #8, #9

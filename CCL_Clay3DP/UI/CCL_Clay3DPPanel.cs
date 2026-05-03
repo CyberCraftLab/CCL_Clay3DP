@@ -60,6 +60,23 @@ namespace CCL_Clay3DP.UI
         // scaled selection would compound the scale, hence the split.
         private GeometrySelection _lastRawGeometry;
 
+        // Slice 2f — set true around our own doc.Objects.Transform call
+        // (the auto-translate inside RunPipeline) so the
+        // ReplaceRhinoObject handler ignores the event we triggered
+        // ourselves. Without this, RunPipeline's auto-translate would
+        // re-fire the handler → rebuild → transform → infinite loop.
+        // Rhino fires ReplaceRhinoObject synchronously during the
+        // transform, so a simple bool flag is sufficient.
+        private bool _suppressGeometryChangeRebuild = false;
+
+        // Slice 2f — debounces the auto-rebuild trigger so dragging
+        // the Gumball (which fires ReplaceRhinoObject many times per
+        // second) only kicks off ONE rebuild when the user releases.
+        // 500 ms is a comfortable wait — long enough that a continuous
+        // drag coalesces, short enough to feel responsive after a
+        // single click-and-drop edit.
+        private UITimer _rebuildDebounce;
+
 
         // Workflow controls disabled until the user reviews Settings at least
         // once in this session. Avoids users clicking Slice with stale or
@@ -71,6 +88,13 @@ namespace CCL_Clay3DP.UI
         {
             _settings = SettingsManager.Load();
             BuildUI();
+
+            // Slice 2f — debounced auto-rebuild on source-geometry
+            // transform. Subscribe to the global Rhino event; the handler
+            // filters for our cached _lastRawGeometry.SourceObjectId.
+            _rebuildDebounce = new UITimer { Interval = 0.5 };
+            _rebuildDebounce.Elapsed += OnRebuildDebounceElapsed;
+            RhinoDoc.ReplaceRhinoObject += OnRhinoObjectReplaced;
         }
 
         private void BuildUI()
@@ -396,6 +420,30 @@ namespace CCL_Clay3DP.UI
         /// </summary>
         private void RunPipeline(GeometrySelection selection)
         {
+            // 0) Physical-feasibility gate (Slice 5a). A layer height
+            // larger than the bead diameter means the extruder is asked
+            // to span a vertical gap larger than the bead's own
+            // diameter — the bead would float in mid-air and not bond
+            // to the previous layer. Reject early; user must adjust
+            // either the layer height or the bead diameter in Settings.
+            // Tiny epsilon so equal-to-diameter (layer == bead, perfect
+            // squash-flush) is allowed.
+            if (_settings.Helix.LayerHeight > _settings.Clay.BeadDiameter + 1e-6)
+            {
+                MessageBox.Show(
+                    $"Layer height ({_settings.Helix.LayerHeight:F2} mm) exceeds " +
+                    $"bead diameter ({_settings.Clay.BeadDiameter:F2} mm).\n\n" +
+                    "This is physically impossible — clay can't span a vertical " +
+                    "gap larger than its own diameter; the bead would not bond " +
+                    "to the previous layer.\n\n" +
+                    "Adjust either the layer height (lower) or the bead diameter " +
+                    "(higher) in Settings, then click Slice again.",
+                    "Layer height exceeds bead diameter",
+                    MessageBoxButtons.OK, MessageBoxType.Warning);
+                SetStatus("Layer height > bead diameter — slice cancelled");
+                return;
+            }
+
             // 1) Outer Wall Bracing gate — bracing's per-layer
             // DivideByCount + seam-align algorithm only behaves on ruled
             // / extrudable geometry. On free-form (sphere, organic Brep)
@@ -432,15 +480,25 @@ namespace CCL_Clay3DP.UI
 
             // 4) Auto-translate to origin (idempotent for already-at-
             // origin geometry). Mirrors PrusaSlicer / Cura behavior;
-            // the move is undoable with Ctrl+Z.
+            // the move is undoable with Ctrl+Z. The suppress flag
+            // (Slice 2f) keeps our own transform from re-triggering
+            // the geometry-change auto-rebuild handler.
             double translationDistance;
             var translation = ComputePrintingTranslation(
                 selection, out translationDistance);
             if (doc != null && translationDistance >= 0.001
                 && selection.SourceObjectId != Guid.Empty)
             {
-                doc.Objects.Transform(
-                    selection.SourceObjectId, translation, true);
+                _suppressGeometryChangeRebuild = true;
+                try
+                {
+                    doc.Objects.Transform(
+                        selection.SourceObjectId, translation, true);
+                }
+                finally
+                {
+                    _suppressGeometryChangeRebuild = false;
+                }
             }
             var printingSelection = ApplyTransform(selection, translation);
 
@@ -1696,18 +1754,67 @@ namespace CCL_Clay3DP.UI
                     SetStatus("Bead diameter must be > 0 in Clay settings");
                     return;
                 }
+                double layerHeight = _settings.Helix.LayerHeight;
+                if (layerHeight <= 0)
+                {
+                    SetStatus("Layer height must be > 0 in Toolpath settings");
+                    return;
+                }
+                // Same physical-feasibility gate as RunPipeline (Slice 5a) —
+                // preview can be invoked on stale toolpath layers without
+                // re-slicing, so we re-check here too.
+                if (layerHeight > diameter + 1e-6)
+                {
+                    MessageBox.Show(
+                        $"Layer height ({layerHeight:F2} mm) exceeds bead diameter " +
+                        $"({diameter:F2} mm).\n\n" +
+                        "Preview can't represent a bead that doesn't bond. Adjust " +
+                        "either parameter in Settings, then re-slice and preview.",
+                        "Layer height exceeds bead diameter",
+                        MessageBoxButtons.OK, MessageBoxType.Warning);
+                    SetStatus("Preview cancelled — layer height > bead diameter");
+                    return;
+                }
+
+                // Cross-section dimensions (Slice 5c). Layer height squashes
+                // the bead vertically; mass / cross-section-area conservation
+                // means it spreads horizontally:
+                //   π × (D/2)²  =  π × (W/2) × (H/2)
+                //   →  W  =  D² / H
+                // When H == D the bead stays circular (W = D); when H < D
+                // it widens into an ellipse with minor axis vertical.
                 double radius = diameter * 0.5;
+                double widthRadius;
+                double heightRadius;
+                if (Math.Abs(layerHeight - diameter) < 1e-6)
+                {
+                    // Circle — preserved exactly so the existing optimised
+                    // CreateFromCurvePipe path is used.
+                    widthRadius  = radius;
+                    heightRadius = radius;
+                }
+                else
+                {
+                    widthRadius  = (diameter * diameter) / (2.0 * layerHeight);
+                    heightRadius = layerHeight * 0.5;
+                }
+                bool elliptical = Math.Abs(widthRadius - heightRadius) > 1e-6;
 
                 // Source layers: covers every mode that produces a toolpath
                 // curve. Spiral mode emits one curve on Spiral Toolpath;
-                // Layer / Layer+Bracing modes emit up to three. The clay
-                // preview pipes whichever exist.
+                // Layer / Layer+Bracing modes emit up to three. Slice 5b
+                // adds Skirt + Base layers so the preview shows the full
+                // print stack — what the robot actually deposits — not
+                // just the part body.
                 var sourceLayerNames = new[]
                 {
                     "3DP::Spiral Toolpath",
                     "3DP::Outer Toolpath",
                     "3DP::Inner Toolpath",
                     "3DP::Bracing Toolpath",
+                    "3DP::Skirt",
+                    "3DP::Base Contour",
+                    "3DP::Base Infill",
                 };
                 var srcIndices = new System.Collections.Generic.HashSet<int>();
                 foreach (var name in sourceLayerNames)
@@ -1738,9 +1845,13 @@ namespace CCL_Clay3DP.UI
                 // Warn before starting — generation can take a while on dense
                 // stacks and users were getting spooked by the hang.
                 // No parent → centered on screen, not on the docked panel.
+                string crossSectionMsg = elliptical
+                    ? $"elliptical bead {widthRadius * 2.0:F2} × {heightRadius * 2.0:F2} mm " +
+                      $"(area-conserved from {diameter:F2} mm round @ {layerHeight:F2} mm layer)"
+                    : $"{diameter:F2} mm round bead";
                 var confirm = MessageBox.Show(
                     $"About to build the clay model preview from {curves.Count} " +
-                    $"toolpath curves at {diameter:F2} mm bead diameter.\n\n" +
+                    $"toolpath curves at {crossSectionMsg}.\n\n" +
                     "This can take a few moments on dense geometry. Continue?",
                     "CCL_Clay3DP — Preview Clay Model",
                     MessageBoxButtons.YesNo,
@@ -1807,9 +1918,20 @@ namespace CCL_Clay3DP.UI
                     Mesh tube = null;
                     try
                     {
-                        tube = Mesh.CreateFromCurvePipe(
-                            pipeInput, radius, 12, 1,
-                            MeshPipeCapStyle.Flat, false);
+                        if (elliptical)
+                        {
+                            // Slice 5c — manual elliptical sweep so the
+                            // cross-section can have a different vertical
+                            // (height) and horizontal (width) extent.
+                            tube = BuildEllipticalTube(
+                                pipeInput, widthRadius, heightRadius, 12);
+                        }
+                        else
+                        {
+                            tube = Mesh.CreateFromCurvePipe(
+                                pipeInput, widthRadius, 12, 1,
+                                MeshPipeCapStyle.Flat, false);
+                        }
                     }
                     catch (Exception tubeEx)
                     {
@@ -1844,10 +1966,30 @@ namespace CCL_Clay3DP.UI
                         int stride = Math.Max(1, (last + maxSpheres - 1) / maxSpheres);
                         for (int k = 0; k < last; k += stride)
                         {
-                            var sphereMesh = Mesh.CreateFromSphere(
-                                new Sphere(pl[k], radius), 8, 6);
-                            if (sphereMesh != null && sphereMesh.IsValid)
-                                doc.Objects.AddMesh(sphereMesh, attrs);
+                            Mesh fillerMesh;
+                            if (elliptical)
+                            {
+                                // Match the ellipse cross-section: sphere
+                                // scaled non-uniformly (W,W,H) so the gap
+                                // filler reads as the same bead shape as
+                                // the tube.
+                                fillerMesh = Mesh.CreateFromSphere(
+                                    new Sphere(Point3d.Origin, 1.0), 8, 6);
+                                if (fillerMesh != null)
+                                {
+                                    fillerMesh.Transform(Transform.Scale(
+                                        Plane.WorldXY,
+                                        widthRadius, widthRadius, heightRadius));
+                                    fillerMesh.Translate(pl[k] - Point3d.Origin);
+                                }
+                            }
+                            else
+                            {
+                                fillerMesh = Mesh.CreateFromSphere(
+                                    new Sphere(pl[k], widthRadius), 8, 6);
+                            }
+                            if (fillerMesh != null && fillerMesh.IsValid)
+                                doc.Objects.AddMesh(fillerMesh, attrs);
                         }
                     }
 
@@ -1936,6 +2078,144 @@ namespace CCL_Clay3DP.UI
             }
             foreach (var v in victims) doc.Objects.Delete(v, true);
             doc.Views.Redraw();
+        }
+
+        /// <summary>
+        /// Build a tube mesh of elliptical cross-section along a polyline
+        /// (Slice 5c). The ellipse's vertical (Z) semi-axis is fixed in
+        /// world Z; the horizontal semi-axis lies in the XY plane,
+        /// perpendicular to the local curve tangent. This matches the
+        /// physical reality of a clay bead squashed by the build plate
+        /// or previous layer:
+        ///   * heightRadius = layer height / 2  (vertical squash extent)
+        ///   * widthRadius  = D² / (2H) / 2  (lateral spread, area-
+        ///     conserved with the original D-diameter circular bead)
+        ///
+        /// segments = number of vertices around each ellipse ring.
+        /// 12 matches what Mesh.CreateFromCurvePipe uses by default.
+        ///
+        /// Closed input polylines (skirt, contour loops) connect last
+        /// ring → first ring with no caps. Open polylines (spirals,
+        /// infill zigzags) get fan-triangulated end caps so the tube
+        /// reads as solid.
+        /// </summary>
+        private static Mesh BuildEllipticalTube(
+            Curve curve,
+            double widthRadius,
+            double heightRadius,
+            int segments)
+        {
+            if (curve == null) return null;
+            if (!curve.TryGetPolyline(out Polyline pl) || pl.Count < 2) return null;
+            if (segments < 3) segments = 3;
+
+            int n = pl.Count;
+            bool closed = pl.IsClosed;
+            // Closed polylines from Rhino include a duplicated last
+            // vertex equal to the first. Drop it so the ring math
+            // doesn't generate a degenerate sliver.
+            if (closed && n > 2 && pl[0].DistanceTo(pl[n - 1]) < 1e-9)
+                n -= 1;
+
+            var mesh = new Mesh();
+
+            // Build one ring of `segments` vertices around each polyline
+            // vertex. Tangent uses central differences for interior
+            // vertices and end-of-segment for endpoints / closed-loop
+            // wraparound.
+            for (int i = 0; i < n; i++)
+            {
+                Point3d p = pl[i];
+
+                Vector3d tangent;
+                if (closed)
+                {
+                    int prev = (i - 1 + n) % n;
+                    int next = (i + 1) % n;
+                    tangent = pl[next] - pl[prev];
+                }
+                else if (i == 0)
+                {
+                    tangent = pl[1] - pl[0];
+                }
+                else if (i == n - 1)
+                {
+                    tangent = pl[i] - pl[i - 1];
+                }
+                else
+                {
+                    tangent = pl[i + 1] - pl[i - 1];
+                }
+                if (!tangent.Unitize())
+                    tangent = Vector3d.XAxis;
+
+                // Cross-section frame: horizontal-perp axis lies in
+                // world XY (tangent × Z); vertical axis is world Z.
+                Vector3d zUp = Vector3d.ZAxis;
+                Vector3d horiz = Vector3d.CrossProduct(zUp, tangent);
+                if (!horiz.Unitize())
+                {
+                    // Tangent is purely vertical (rare — spiral going
+                    // straight up at a singular point). Fall back to
+                    // world X so the ring is at least non-degenerate.
+                    horiz = Vector3d.XAxis;
+                }
+
+                for (int s = 0; s < segments; s++)
+                {
+                    double angle = 2.0 * Math.PI * s / segments;
+                    Vector3d offset =
+                        widthRadius  * Math.Cos(angle) * horiz +
+                        heightRadius * Math.Sin(angle) * zUp;
+                    mesh.Vertices.Add(p + offset);
+                }
+            }
+
+            // Connect adjacent rings with quad faces. Closed: every
+            // ring has a successor (last → first). Open: skip the last.
+            int ringCount = closed ? n : n - 1;
+            for (int i = 0; i < ringCount; i++)
+            {
+                int next = (i + 1) % n;
+                int baseI = i * segments;
+                int baseN = next * segments;
+                for (int s = 0; s < segments; s++)
+                {
+                    int s1 = (s + 1) % segments;
+                    mesh.Faces.AddFace(
+                        baseI + s,
+                        baseI + s1,
+                        baseN + s1,
+                        baseN + s);
+                }
+            }
+
+            // End caps for open polylines — fan triangles from a centre
+            // vertex at each endpoint to that ring's perimeter.
+            if (!closed)
+            {
+                int firstCentre = mesh.Vertices.Add(pl[0]);
+                for (int s = 0; s < segments; s++)
+                {
+                    int s1 = (s + 1) % segments;
+                    mesh.Faces.AddFace(firstCentre, s1, s);
+                }
+
+                int lastRingStart = (n - 1) * segments;
+                int lastCentre = mesh.Vertices.Add(pl[n - 1]);
+                for (int s = 0; s < segments; s++)
+                {
+                    int s1 = (s + 1) % segments;
+                    mesh.Faces.AddFace(
+                        lastCentre,
+                        lastRingStart + s,
+                        lastRingStart + s1);
+                }
+            }
+
+            mesh.Normals.ComputeNormals();
+            mesh.Compact();
+            return mesh;
         }
 
         private void OnRunAllClick(object sender, EventArgs e)
@@ -2156,6 +2436,91 @@ namespace CCL_Clay3DP.UI
             {
                 // Centering is cosmetic — never let it throw.
             }
+        }
+
+        // ---------------------------------------------------------------
+        // Slice 2f — auto-rebuild when the source geometry is transformed
+        // in the Rhino doc (move, scale, rotate, gumball drag, etc.).
+        //
+        // RhinoDoc.ReplaceRhinoObject fires synchronously on every
+        // object modification, including all transforms. The handler
+        // filters for our cached _lastRawGeometry.SourceObjectId and
+        // kicks the debounce timer; the debounce coalesces a continuous
+        // drag into a single rebuild on release. The suppress flag
+        // ignores the event WE triggered ourselves via RunPipeline's
+        // auto-translate (which would otherwise loop infinitely).
+        //
+        // Skip cases:
+        //   - No cached geometry yet (user hasn't sliced once)
+        //   - Layer + Bracing combo (interactive prompts make auto-
+        //     rebuild on every drag intolerable — same fallback as
+        //     Slice 2e settings-change rebuild)
+        // ---------------------------------------------------------------
+
+        private void OnRhinoObjectReplaced(object sender, RhinoReplaceObjectEventArgs e)
+        {
+            if (_suppressGeometryChangeRebuild) return;
+            if (_lastRawGeometry == null) return;
+            if (_lastRawGeometry.SourceObjectId == Guid.Empty) return;
+            if (e.ObjectId != _lastRawGeometry.SourceObjectId) return;
+
+            // Restart the debounce. Any in-flight pending rebuild gets
+            // pushed back another 500 ms — this is what coalesces a
+            // continuous drag into one rebuild.
+            _rebuildDebounce.Stop();
+            _rebuildDebounce.Start();
+        }
+
+        private void OnRebuildDebounceElapsed(object sender, EventArgs e)
+        {
+            _rebuildDebounce.Stop();
+
+            // Layer + Bracing combo prompts mid-slice; auto-rebuilding
+            // on every geometry edit would spam those prompts. Same
+            // fallback policy as the Slice 2e settings-change rebuild.
+            bool layerBracing = !_settings.Helix.SpiralSlice
+                && _settings.Helix.OuterWallBracing;
+            if (layerBracing)
+            {
+                SetStatus("Geometry changed — click Slice to regenerate (Layer + Bracing needs interactive prompts)");
+                return;
+            }
+
+            // Fetch the post-edit geometry from the doc. The user may
+            // have deleted or replaced it with an unsupported type;
+            // bail gracefully if we can't recover a usable selection.
+            var doc = RhinoDoc.ActiveDoc;
+            if (doc == null || _lastRawGeometry == null) return;
+            var docObj = doc.Objects.Find(_lastRawGeometry.SourceObjectId);
+            if (docObj == null || !docObj.IsValid)
+            {
+                // Object was deleted — clear the cache so we don't keep
+                // listening to a phantom ID, and let the user click
+                // Slice when they're ready with new geometry.
+                _lastRawGeometry = null;
+                SetStatus("Source geometry deleted — click Slice with new geometry");
+                return;
+            }
+
+            var fresh = new GeometrySelection
+            {
+                SourceObjectId = _lastRawGeometry.SourceObjectId,
+            };
+            if (docObj.Geometry is Brep brep)
+                fresh.Brep = brep.DuplicateBrep();
+            else if (docObj.Geometry is Surface surf)
+                fresh.Brep = surf.ToBrep();
+            else if (docObj.Geometry is Mesh mesh)
+                fresh.Mesh = mesh.DuplicateMesh();
+            else
+            {
+                SetStatus("Source geometry replaced with unsupported type — click Slice with new geometry");
+                return;
+            }
+
+            SetStatus("Geometry changed — regenerating...");
+            RhinoApp.Wait();
+            RunPipeline(fresh);
         }
 
         private void SetStatus(string message)
