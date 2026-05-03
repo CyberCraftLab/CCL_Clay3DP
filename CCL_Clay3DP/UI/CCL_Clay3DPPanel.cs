@@ -1758,14 +1758,19 @@ namespace CCL_Clay3DP.UI
 
                 // Source layers: covers every mode that produces a toolpath
                 // curve. Spiral mode emits one curve on Spiral Toolpath;
-                // Layer / Layer+Bracing modes emit up to three. The clay
-                // preview pipes whichever exist.
+                // Layer / Layer+Bracing modes emit up to three. Slice 5b
+                // adds Skirt + Base layers so the preview shows the full
+                // print stack — what the robot actually deposits — not
+                // just the part body.
                 var sourceLayerNames = new[]
                 {
                     "3DP::Spiral Toolpath",
                     "3DP::Outer Toolpath",
                     "3DP::Inner Toolpath",
                     "3DP::Bracing Toolpath",
+                    "3DP::Skirt",
+                    "3DP::Base Contour",
+                    "3DP::Base Infill",
                 };
                 var srcIndices = new System.Collections.Generic.HashSet<int>();
                 foreach (var name in sourceLayerNames)
