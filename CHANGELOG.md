@@ -5,6 +5,47 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning is [Semantic](https://semver.org/) with an `-alpha` suffix
 while the plugin is pre-release.
 
+## [1.2.1-alpha] — 2026-05-03
+
+Same-day polish release after 1.2.0-alpha. One real bug fix; the
+rest is documentation and code cleanup with no user-visible
+behaviour change.
+
+### Fixed
+
+- **Panel handler / timer leak across re-open**. The dock panel
+  subscribes to `RhinoDoc.ReplaceRhinoObject` and constructs a
+  `UITimer` in its constructor (the geometry-change auto-rebuild
+  introduced in 1.2.0-alpha). If the user closed and re-opened
+  the dock, the old subscription stayed attached to the disposed
+  instance and would eventually fire on a disposed timer. Added
+  a `Dispose(bool)` override that unsubscribes the event and
+  disposes the timer.
+
+### Changed
+
+- `ARCHITECTURE.md` refreshed against the v1.2.0-alpha state.
+  Section 3 slice-pipeline diagram redrawn to show `RunPipeline`
+  as the single entry point with its three call sites
+  (OnSliceClick, OnSettingsClick auto-rebuild, geometry-change
+  debounce). `BuildVolumeSettings` class diagram switched to
+  Width / Depth / Height with the computed `JsonIgnore`d
+  XMin/XMax/YMin/YMax. Cached-state table adds the geometry-
+  change recursion guard and debounce timer. Slice history
+  filled in for 2f, 3, 5a, 5b, 5c. RoboDK callout updated to
+  reflect the launch issue closing without a fix.
+- `README.md` version line bumped 1.1.1 → 1.2.0 (missed in the
+  1.2.0-alpha release commit).
+- Internal cleanup from a 3-agent code-review pass: extracted
+  `MakeBeadFiller` helper to dedupe the sphere / scaled-ellipsoid
+  branch in the Preview Clay Model loop; inlined a read-once
+  `radius` local; stripped 19 narrative "Slice 2X / 5X" tags
+  from production comments (slice mapping is preserved by git
+  history, the changelog, and the architecture doc); consolidated
+  5 inline copies of the "no parent → centered on screen"
+  comment into a single explanation in the `CenterOnActiveScreen`
+  docstring.
+
 ## [1.2.0-alpha] — 2026-05-03
 
 Settings UI redesign + Material section expansion + build-volume
