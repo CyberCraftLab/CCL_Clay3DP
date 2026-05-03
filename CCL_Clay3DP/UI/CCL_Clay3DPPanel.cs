@@ -420,6 +420,30 @@ namespace CCL_Clay3DP.UI
         /// </summary>
         private void RunPipeline(GeometrySelection selection)
         {
+            // 0) Physical-feasibility gate (Slice 5a). A layer height
+            // larger than the bead diameter means the extruder is asked
+            // to span a vertical gap larger than the bead's own
+            // diameter — the bead would float in mid-air and not bond
+            // to the previous layer. Reject early; user must adjust
+            // either the layer height or the bead diameter in Settings.
+            // Tiny epsilon so equal-to-diameter (layer == bead, perfect
+            // squash-flush) is allowed.
+            if (_settings.Helix.LayerHeight > _settings.Clay.BeadDiameter + 1e-6)
+            {
+                MessageBox.Show(
+                    $"Layer height ({_settings.Helix.LayerHeight:F2} mm) exceeds " +
+                    $"bead diameter ({_settings.Clay.BeadDiameter:F2} mm).\n\n" +
+                    "This is physically impossible — clay can't span a vertical " +
+                    "gap larger than its own diameter; the bead would not bond " +
+                    "to the previous layer.\n\n" +
+                    "Adjust either the layer height (lower) or the bead diameter " +
+                    "(higher) in Settings, then click Slice again.",
+                    "Layer height exceeds bead diameter",
+                    MessageBoxButtons.OK, MessageBoxType.Warning);
+                SetStatus("Layer height > bead diameter — slice cancelled");
+                return;
+            }
+
             // 1) Outer Wall Bracing gate — bracing's per-layer
             // DivideByCount + seam-align algorithm only behaves on ruled
             // / extrudable geometry. On free-form (sphere, organic Brep)
