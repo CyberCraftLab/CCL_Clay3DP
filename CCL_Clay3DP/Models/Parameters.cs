@@ -12,6 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.Collections.Generic;
+using System.Runtime.Serialization;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using Rhino.Geometry;
 
 namespace CCL_Clay3DP.Models
@@ -46,18 +50,55 @@ namespace CCL_Clay3DP.Models
     // Cell-specific build volume — the printable space the robot can
     // physically reach with the extruder. Used to render a wireframe
     // box at slice time so users can see whether their part fits, and
-    // to center new geometry on the build plate (Issue #1 origin
-    // translation puts bbox bottom-center at world origin, which is
-    // also (XMin+XMax)/2, (YMin+YMax)/2 of this volume when symmetric).
+    // to center new geometry on the build plate.
     //
-    // Z always starts at 0 (build plate). Height = upper Z extent.
+    // Slice 3 model: sized as Width × Depth × Height, centered on the
+    // world origin in XY (so the build plate's center is at world 0,0,0
+    // and matches the auto-translate target). Z always starts at 0 (the
+    // build plate). XMin/XMax/YMin/YMax are exposed as JsonIgnore'd
+    // computed properties so existing pipeline code (BakeBuildVolume,
+    // BuildVolumeCheck) keeps working unchanged.
     public class BuildVolumeSettings
     {
-        public double XMin { get; set; } = -200.0;
-        public double XMax { get; set; } =  200.0;
-        public double YMin { get; set; } = -200.0;
-        public double YMax { get; set; } =  200.0;
+        public double Width  { get; set; } = 400.0;
+        public double Depth  { get; set; } = 400.0;
         public double Height { get; set; } = 1000.0;
+
+        [JsonIgnore] public double XMin => -Width / 2.0;
+        [JsonIgnore] public double XMax =>  Width / 2.0;
+        [JsonIgnore] public double YMin => -Depth / 2.0;
+        [JsonIgnore] public double YMax =>  Depth / 2.0;
+
+        // Slice 3 — JSON migration from the pre-Slice-3 schema, which
+        // wrote XMin/XMax/YMin/YMax instead of Width/Depth. Newtonsoft
+        // captures unknown JSON fields here, then OnDeserialized rolls
+        // them up into Width/Depth so the user's saved build volume
+        // doesn't reset to defaults after the upgrade. Future saves
+        // emit only Width/Depth/Height; the legacy fields disappear
+        // from settings.json on next save.
+        // CS0649 suppressed because Newtonsoft assigns this field via
+        // reflection during deserialization — the compiler can't see the
+        // assignment and warns "never assigned".
+#pragma warning disable CS0649
+        [JsonExtensionData]
+        private IDictionary<string, JToken> _legacy;
+#pragma warning restore CS0649
+
+        [OnDeserialized]
+        internal void OnDeserialized(StreamingContext context)
+        {
+            if (_legacy == null) return;
+            if (_legacy.TryGetValue("XMin", out var xmin)
+                && _legacy.TryGetValue("XMax", out var xmax))
+            {
+                Width = (double)xmax - (double)xmin;
+            }
+            if (_legacy.TryGetValue("YMin", out var ymin)
+                && _legacy.TryGetValue("YMax", out var ymax))
+            {
+                Depth = (double)ymax - (double)ymin;
+            }
+        }
     }
 
     public class HelixParameters

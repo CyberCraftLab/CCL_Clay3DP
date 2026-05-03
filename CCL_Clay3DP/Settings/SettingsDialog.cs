@@ -65,13 +65,12 @@ namespace CCL_Clay3DP.Settings
         private TextBox _stationTemplatePath;
         private TextBox _projectName;
 
-        // Build Volume fields (Issue #8 follow-up). Z always starts at 0
-        // (build plate); only the X/Y bounds and the upper Z height are
-        // user-settable.
-        private NumericStepper _buildVolumeXMin;
-        private NumericStepper _buildVolumeXMax;
-        private NumericStepper _buildVolumeYMin;
-        private NumericStepper _buildVolumeYMax;
+        // Build Volume fields. Slice 3 simplification: Width × Depth × Height
+        // centered on world origin (build plate at world 0,0,0). Z always
+        // starts at 0 (build plate); the model still exposes XMin/XMax/YMin/
+        // YMax as computed properties for downstream consumers.
+        private NumericStepper _buildVolumeWidth;
+        private NumericStepper _buildVolumeDepth;
         private NumericStepper _buildVolumeHeight;
 
         // Set to true while we programmatically toggle the
@@ -257,12 +256,13 @@ namespace CCL_Clay3DP.Settings
             browseStation.Click += (s, e) => BrowseFile(_stationTemplatePath, "RoboDK Station", "*.rdk");
 
             // --- Build Volume ---
-            // Wide ranges so any reasonable robot cell fits. The wireframe
-            // box bakes onto layer "3DP::Build Volume" at slice time.
-            _buildVolumeXMin = CreateStepper(-5000.0, 0.0, 10.0, 0);
-            _buildVolumeXMax = CreateStepper(0.0, 5000.0, 10.0, 0);
-            _buildVolumeYMin = CreateStepper(-5000.0, 0.0, 10.0, 0);
-            _buildVolumeYMax = CreateStepper(0.0, 5000.0, 10.0, 0);
+            // Slice 3: simplified to Width × Depth × Height (mm), centered
+            // on the world origin in XY (build plate at world 0,0,0). Z
+            // always starts at 0 (the build plate). Wide ranges so any
+            // reasonable robot cell fits. The wireframe box bakes onto
+            // layer "3DP::Build Volume" at slice time.
+            _buildVolumeWidth  = CreateStepper(1.0, 5000.0, 10.0, 0);
+            _buildVolumeDepth  = CreateStepper(1.0, 5000.0, 10.0, 0);
             _buildVolumeHeight = CreateStepper(1.0, 5000.0, 10.0, 0);
 
             var buildVolumeGroup = new GroupBox
@@ -274,16 +274,13 @@ namespace CCL_Clay3DP.Settings
                     Padding = new Padding(8),
                     Rows =
                     {
-                        LabeledRow("X min", _buildVolumeXMin,
-                            "Minimum X coordinate of the printable workspace, in mm " +
-                            "(relative to world origin = build plate center)."),
-                        LabeledRow("X max", _buildVolumeXMax,
-                            "Maximum X coordinate of the printable workspace, in mm."),
-                        LabeledRow("Y min", _buildVolumeYMin,
-                            "Minimum Y coordinate of the printable workspace, in mm."),
-                        LabeledRow("Y max", _buildVolumeYMax,
-                            "Maximum Y coordinate of the printable workspace, in mm."),
-                        LabeledRow("Z height (Z min always 0)", _buildVolumeHeight,
+                        LabeledRow("Width (X)", _buildVolumeWidth,
+                            "Build plate width along X, in mm. The volume is centered " +
+                            "on the world origin so X bounds are ±Width/2."),
+                        LabeledRow("Depth (Y)", _buildVolumeDepth,
+                            "Build plate depth along Y, in mm. The volume is centered " +
+                            "on the world origin so Y bounds are ±Depth/2."),
+                        LabeledRow("Height (Z)", _buildVolumeHeight,
                             "Maximum Z height of the printable workspace, in mm. Z always " +
                             "starts at 0 (build plate)."),
                     },
@@ -560,10 +557,8 @@ namespace CCL_Clay3DP.Settings
             _projectName.Text = _settings.Robot.RoboDKProjectName;
 
             // Build Volume
-            _buildVolumeXMin.Value = _settings.BuildVolume.XMin;
-            _buildVolumeXMax.Value = _settings.BuildVolume.XMax;
-            _buildVolumeYMin.Value = _settings.BuildVolume.YMin;
-            _buildVolumeYMax.Value = _settings.BuildVolume.YMax;
+            _buildVolumeWidth.Value  = _settings.BuildVolume.Width;
+            _buildVolumeDepth.Value  = _settings.BuildVolume.Depth;
             _buildVolumeHeight.Value = _settings.BuildVolume.Height;
 
             UpdateToolpathFieldsEnabled();
@@ -613,10 +608,8 @@ namespace CCL_Clay3DP.Settings
             _settings.Robot.RoboDKProjectName = _projectName.Text;
 
             // Build Volume
-            _settings.BuildVolume.XMin = _buildVolumeXMin.Value;
-            _settings.BuildVolume.XMax = _buildVolumeXMax.Value;
-            _settings.BuildVolume.YMin = _buildVolumeYMin.Value;
-            _settings.BuildVolume.YMax = _buildVolumeYMax.Value;
+            _settings.BuildVolume.Width  = _buildVolumeWidth.Value;
+            _settings.BuildVolume.Depth  = _buildVolumeDepth.Value;
             _settings.BuildVolume.Height = _buildVolumeHeight.Value;
         }
 
