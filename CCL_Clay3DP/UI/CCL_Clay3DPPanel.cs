@@ -1754,7 +1754,51 @@ namespace CCL_Clay3DP.UI
                     SetStatus("Bead diameter must be > 0 in Clay settings");
                     return;
                 }
+                double layerHeight = _settings.Helix.LayerHeight;
+                if (layerHeight <= 0)
+                {
+                    SetStatus("Layer height must be > 0 in Toolpath settings");
+                    return;
+                }
+                // Same physical-feasibility gate as RunPipeline (Slice 5a) —
+                // preview can be invoked on stale toolpath layers without
+                // re-slicing, so we re-check here too.
+                if (layerHeight > diameter + 1e-6)
+                {
+                    MessageBox.Show(
+                        $"Layer height ({layerHeight:F2} mm) exceeds bead diameter " +
+                        $"({diameter:F2} mm).\n\n" +
+                        "Preview can't represent a bead that doesn't bond. Adjust " +
+                        "either parameter in Settings, then re-slice and preview.",
+                        "Layer height exceeds bead diameter",
+                        MessageBoxButtons.OK, MessageBoxType.Warning);
+                    SetStatus("Preview cancelled — layer height > bead diameter");
+                    return;
+                }
+
+                // Cross-section dimensions (Slice 5c). Layer height squashes
+                // the bead vertically; mass / cross-section-area conservation
+                // means it spreads horizontally:
+                //   π × (D/2)²  =  π × (W/2) × (H/2)
+                //   →  W  =  D² / H
+                // When H == D the bead stays circular (W = D); when H < D
+                // it widens into an ellipse with minor axis vertical.
                 double radius = diameter * 0.5;
+                double widthRadius;
+                double heightRadius;
+                if (Math.Abs(layerHeight - diameter) < 1e-6)
+                {
+                    // Circle — preserved exactly so the existing optimised
+                    // CreateFromCurvePipe path is used.
+                    widthRadius  = radius;
+                    heightRadius = radius;
+                }
+                else
+                {
+                    widthRadius  = (diameter * diameter) / (2.0 * layerHeight);
+                    heightRadius = layerHeight * 0.5;
+                }
+                bool elliptical = Math.Abs(widthRadius - heightRadius) > 1e-6;
 
                 // Source layers: covers every mode that produces a toolpath
                 // curve. Spiral mode emits one curve on Spiral Toolpath;
@@ -1801,9 +1845,13 @@ namespace CCL_Clay3DP.UI
                 // Warn before starting — generation can take a while on dense
                 // stacks and users were getting spooked by the hang.
                 // No parent → centered on screen, not on the docked panel.
+                string crossSectionMsg = elliptical
+                    ? $"elliptical bead {widthRadius * 2.0:F2} × {heightRadius * 2.0:F2} mm " +
+                      $"(area-conserved from {diameter:F2} mm round @ {layerHeight:F2} mm layer)"
+                    : $"{diameter:F2} mm round bead";
                 var confirm = MessageBox.Show(
                     $"About to build the clay model preview from {curves.Count} " +
-                    $"toolpath curves at {diameter:F2} mm bead diameter.\n\n" +
+                    $"toolpath curves at {crossSectionMsg}.\n\n" +
                     "This can take a few moments on dense geometry. Continue?",
                     "CCL_Clay3DP — Preview Clay Model",
                     MessageBoxButtons.YesNo,
@@ -1870,9 +1918,20 @@ namespace CCL_Clay3DP.UI
                     Mesh tube = null;
                     try
                     {
-                        tube = Mesh.CreateFromCurvePipe(
-                            pipeInput, radius, 12, 1,
-                            MeshPipeCapStyle.Flat, false);
+                        if (elliptical)
+                        {
+                            // Slice 5c — manual elliptical sweep so the
+                            // cross-section can have a different vertical
+                            // (height) and horizontal (width) extent.
+                            tube = BuildEllipticalTube(
+                                pipeInput, widthRadius, heightRadius, 12);
+                        }
+                        else
+                        {
+                            tube = Mesh.CreateFromCurvePipe(
+                                pipeInput, widthRadius, 12, 1,
+                                MeshPipeCapStyle.Flat, false);
+                        }
                     }
                     catch (Exception tubeEx)
                     {
@@ -1907,10 +1966,30 @@ namespace CCL_Clay3DP.UI
                         int stride = Math.Max(1, (last + maxSpheres - 1) / maxSpheres);
                         for (int k = 0; k < last; k += stride)
                         {
-                            var sphereMesh = Mesh.CreateFromSphere(
-                                new Sphere(pl[k], radius), 8, 6);
-                            if (sphereMesh != null && sphereMesh.IsValid)
-                                doc.Objects.AddMesh(sphereMesh, attrs);
+                            Mesh fillerMesh;
+                            if (elliptical)
+                            {
+                                // Match the ellipse cross-section: sphere
+                                // scaled non-uniformly (W,W,H) so the gap
+                                // filler reads as the same bead shape as
+                                // the tube.
+                                fillerMesh = Mesh.CreateFromSphere(
+                                    new Sphere(Point3d.Origin, 1.0), 8, 6);
+                                if (fillerMesh != null)
+                                {
+                                    fillerMesh.Transform(Transform.Scale(
+                                        Plane.WorldXY,
+                                        widthRadius, widthRadius, heightRadius));
+                                    fillerMesh.Translate(pl[k] - Point3d.Origin);
+                                }
+                            }
+                            else
+                            {
+                                fillerMesh = Mesh.CreateFromSphere(
+                                    new Sphere(pl[k], widthRadius), 8, 6);
+                            }
+                            if (fillerMesh != null && fillerMesh.IsValid)
+                                doc.Objects.AddMesh(fillerMesh, attrs);
                         }
                     }
 
@@ -1999,6 +2078,144 @@ namespace CCL_Clay3DP.UI
             }
             foreach (var v in victims) doc.Objects.Delete(v, true);
             doc.Views.Redraw();
+        }
+
+        /// <summary>
+        /// Build a tube mesh of elliptical cross-section along a polyline
+        /// (Slice 5c). The ellipse's vertical (Z) semi-axis is fixed in
+        /// world Z; the horizontal semi-axis lies in the XY plane,
+        /// perpendicular to the local curve tangent. This matches the
+        /// physical reality of a clay bead squashed by the build plate
+        /// or previous layer:
+        ///   * heightRadius = layer height / 2  (vertical squash extent)
+        ///   * widthRadius  = D² / (2H) / 2  (lateral spread, area-
+        ///     conserved with the original D-diameter circular bead)
+        ///
+        /// segments = number of vertices around each ellipse ring.
+        /// 12 matches what Mesh.CreateFromCurvePipe uses by default.
+        ///
+        /// Closed input polylines (skirt, contour loops) connect last
+        /// ring → first ring with no caps. Open polylines (spirals,
+        /// infill zigzags) get fan-triangulated end caps so the tube
+        /// reads as solid.
+        /// </summary>
+        private static Mesh BuildEllipticalTube(
+            Curve curve,
+            double widthRadius,
+            double heightRadius,
+            int segments)
+        {
+            if (curve == null) return null;
+            if (!curve.TryGetPolyline(out Polyline pl) || pl.Count < 2) return null;
+            if (segments < 3) segments = 3;
+
+            int n = pl.Count;
+            bool closed = pl.IsClosed;
+            // Closed polylines from Rhino include a duplicated last
+            // vertex equal to the first. Drop it so the ring math
+            // doesn't generate a degenerate sliver.
+            if (closed && n > 2 && pl[0].DistanceTo(pl[n - 1]) < 1e-9)
+                n -= 1;
+
+            var mesh = new Mesh();
+
+            // Build one ring of `segments` vertices around each polyline
+            // vertex. Tangent uses central differences for interior
+            // vertices and end-of-segment for endpoints / closed-loop
+            // wraparound.
+            for (int i = 0; i < n; i++)
+            {
+                Point3d p = pl[i];
+
+                Vector3d tangent;
+                if (closed)
+                {
+                    int prev = (i - 1 + n) % n;
+                    int next = (i + 1) % n;
+                    tangent = pl[next] - pl[prev];
+                }
+                else if (i == 0)
+                {
+                    tangent = pl[1] - pl[0];
+                }
+                else if (i == n - 1)
+                {
+                    tangent = pl[i] - pl[i - 1];
+                }
+                else
+                {
+                    tangent = pl[i + 1] - pl[i - 1];
+                }
+                if (!tangent.Unitize())
+                    tangent = Vector3d.XAxis;
+
+                // Cross-section frame: horizontal-perp axis lies in
+                // world XY (tangent × Z); vertical axis is world Z.
+                Vector3d zUp = Vector3d.ZAxis;
+                Vector3d horiz = Vector3d.CrossProduct(zUp, tangent);
+                if (!horiz.Unitize())
+                {
+                    // Tangent is purely vertical (rare — spiral going
+                    // straight up at a singular point). Fall back to
+                    // world X so the ring is at least non-degenerate.
+                    horiz = Vector3d.XAxis;
+                }
+
+                for (int s = 0; s < segments; s++)
+                {
+                    double angle = 2.0 * Math.PI * s / segments;
+                    Vector3d offset =
+                        widthRadius  * Math.Cos(angle) * horiz +
+                        heightRadius * Math.Sin(angle) * zUp;
+                    mesh.Vertices.Add(p + offset);
+                }
+            }
+
+            // Connect adjacent rings with quad faces. Closed: every
+            // ring has a successor (last → first). Open: skip the last.
+            int ringCount = closed ? n : n - 1;
+            for (int i = 0; i < ringCount; i++)
+            {
+                int next = (i + 1) % n;
+                int baseI = i * segments;
+                int baseN = next * segments;
+                for (int s = 0; s < segments; s++)
+                {
+                    int s1 = (s + 1) % segments;
+                    mesh.Faces.AddFace(
+                        baseI + s,
+                        baseI + s1,
+                        baseN + s1,
+                        baseN + s);
+                }
+            }
+
+            // End caps for open polylines — fan triangles from a centre
+            // vertex at each endpoint to that ring's perimeter.
+            if (!closed)
+            {
+                int firstCentre = mesh.Vertices.Add(pl[0]);
+                for (int s = 0; s < segments; s++)
+                {
+                    int s1 = (s + 1) % segments;
+                    mesh.Faces.AddFace(firstCentre, s1, s);
+                }
+
+                int lastRingStart = (n - 1) * segments;
+                int lastCentre = mesh.Vertices.Add(pl[n - 1]);
+                for (int s = 0; s < segments; s++)
+                {
+                    int s1 = (s + 1) % segments;
+                    mesh.Faces.AddFace(
+                        lastCentre,
+                        lastRingStart + s,
+                        lastRingStart + s1);
+                }
+            }
+
+            mesh.Normals.ComputeNormals();
+            mesh.Compact();
+            return mesh;
         }
 
         private void OnRunAllClick(object sender, EventArgs e)
