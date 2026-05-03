@@ -60,6 +60,23 @@ namespace CCL_Clay3DP.UI
         // scaled selection would compound the scale, hence the split.
         private GeometrySelection _lastRawGeometry;
 
+        // Slice 2f — set true around our own doc.Objects.Transform call
+        // (the auto-translate inside RunPipeline) so the
+        // ReplaceRhinoObject handler ignores the event we triggered
+        // ourselves. Without this, RunPipeline's auto-translate would
+        // re-fire the handler → rebuild → transform → infinite loop.
+        // Rhino fires ReplaceRhinoObject synchronously during the
+        // transform, so a simple bool flag is sufficient.
+        private bool _suppressGeometryChangeRebuild = false;
+
+        // Slice 2f — debounces the auto-rebuild trigger so dragging
+        // the Gumball (which fires ReplaceRhinoObject many times per
+        // second) only kicks off ONE rebuild when the user releases.
+        // 500 ms is a comfortable wait — long enough that a continuous
+        // drag coalesces, short enough to feel responsive after a
+        // single click-and-drop edit.
+        private UITimer _rebuildDebounce;
+
 
         // Workflow controls disabled until the user reviews Settings at least
         // once in this session. Avoids users clicking Slice with stale or
@@ -71,6 +88,13 @@ namespace CCL_Clay3DP.UI
         {
             _settings = SettingsManager.Load();
             BuildUI();
+
+            // Slice 2f — debounced auto-rebuild on source-geometry
+            // transform. Subscribe to the global Rhino event; the handler
+            // filters for our cached _lastRawGeometry.SourceObjectId.
+            _rebuildDebounce = new UITimer { Interval = 0.5 };
+            _rebuildDebounce.Elapsed += OnRebuildDebounceElapsed;
+            RhinoDoc.ReplaceRhinoObject += OnRhinoObjectReplaced;
         }
 
         private void BuildUI()
@@ -432,15 +456,25 @@ namespace CCL_Clay3DP.UI
 
             // 4) Auto-translate to origin (idempotent for already-at-
             // origin geometry). Mirrors PrusaSlicer / Cura behavior;
-            // the move is undoable with Ctrl+Z.
+            // the move is undoable with Ctrl+Z. The suppress flag
+            // (Slice 2f) keeps our own transform from re-triggering
+            // the geometry-change auto-rebuild handler.
             double translationDistance;
             var translation = ComputePrintingTranslation(
                 selection, out translationDistance);
             if (doc != null && translationDistance >= 0.001
                 && selection.SourceObjectId != Guid.Empty)
             {
-                doc.Objects.Transform(
-                    selection.SourceObjectId, translation, true);
+                _suppressGeometryChangeRebuild = true;
+                try
+                {
+                    doc.Objects.Transform(
+                        selection.SourceObjectId, translation, true);
+                }
+                finally
+                {
+                    _suppressGeometryChangeRebuild = false;
+                }
             }
             var printingSelection = ApplyTransform(selection, translation);
 
@@ -2156,6 +2190,91 @@ namespace CCL_Clay3DP.UI
             {
                 // Centering is cosmetic — never let it throw.
             }
+        }
+
+        // ---------------------------------------------------------------
+        // Slice 2f — auto-rebuild when the source geometry is transformed
+        // in the Rhino doc (move, scale, rotate, gumball drag, etc.).
+        //
+        // RhinoDoc.ReplaceRhinoObject fires synchronously on every
+        // object modification, including all transforms. The handler
+        // filters for our cached _lastRawGeometry.SourceObjectId and
+        // kicks the debounce timer; the debounce coalesces a continuous
+        // drag into a single rebuild on release. The suppress flag
+        // ignores the event WE triggered ourselves via RunPipeline's
+        // auto-translate (which would otherwise loop infinitely).
+        //
+        // Skip cases:
+        //   - No cached geometry yet (user hasn't sliced once)
+        //   - Layer + Bracing combo (interactive prompts make auto-
+        //     rebuild on every drag intolerable — same fallback as
+        //     Slice 2e settings-change rebuild)
+        // ---------------------------------------------------------------
+
+        private void OnRhinoObjectReplaced(object sender, RhinoReplaceObjectEventArgs e)
+        {
+            if (_suppressGeometryChangeRebuild) return;
+            if (_lastRawGeometry == null) return;
+            if (_lastRawGeometry.SourceObjectId == Guid.Empty) return;
+            if (e.ObjectId != _lastRawGeometry.SourceObjectId) return;
+
+            // Restart the debounce. Any in-flight pending rebuild gets
+            // pushed back another 500 ms — this is what coalesces a
+            // continuous drag into one rebuild.
+            _rebuildDebounce.Stop();
+            _rebuildDebounce.Start();
+        }
+
+        private void OnRebuildDebounceElapsed(object sender, EventArgs e)
+        {
+            _rebuildDebounce.Stop();
+
+            // Layer + Bracing combo prompts mid-slice; auto-rebuilding
+            // on every geometry edit would spam those prompts. Same
+            // fallback policy as the Slice 2e settings-change rebuild.
+            bool layerBracing = !_settings.Helix.SpiralSlice
+                && _settings.Helix.OuterWallBracing;
+            if (layerBracing)
+            {
+                SetStatus("Geometry changed — click Slice to regenerate (Layer + Bracing needs interactive prompts)");
+                return;
+            }
+
+            // Fetch the post-edit geometry from the doc. The user may
+            // have deleted or replaced it with an unsupported type;
+            // bail gracefully if we can't recover a usable selection.
+            var doc = RhinoDoc.ActiveDoc;
+            if (doc == null || _lastRawGeometry == null) return;
+            var docObj = doc.Objects.Find(_lastRawGeometry.SourceObjectId);
+            if (docObj == null || !docObj.IsValid)
+            {
+                // Object was deleted — clear the cache so we don't keep
+                // listening to a phantom ID, and let the user click
+                // Slice when they're ready with new geometry.
+                _lastRawGeometry = null;
+                SetStatus("Source geometry deleted — click Slice with new geometry");
+                return;
+            }
+
+            var fresh = new GeometrySelection
+            {
+                SourceObjectId = _lastRawGeometry.SourceObjectId,
+            };
+            if (docObj.Geometry is Brep brep)
+                fresh.Brep = brep.DuplicateBrep();
+            else if (docObj.Geometry is Surface surf)
+                fresh.Brep = surf.ToBrep();
+            else if (docObj.Geometry is Mesh mesh)
+                fresh.Mesh = mesh.DuplicateMesh();
+            else
+            {
+                SetStatus("Source geometry replaced with unsupported type — click Slice with new geometry");
+                return;
+            }
+
+            SetStatus("Geometry changed — regenerating...");
+            RhinoApp.Wait();
+            RunPipeline(fresh);
         }
 
         private void SetStatus(string message)
