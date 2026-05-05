@@ -1,0 +1,40 @@
+# Secrets-scan workflow.
+#
+# Runs gitleaks on every pull request and every push to main, so
+# future commits can't accidentally re-introduce credentials, license
+# keys, or other sensitive bytes without the run going red and the PR
+# being blocked.
+#
+# Ported from the original GitLab CI draft on the audit-gitleaks-ci
+# branch (commit 701dcc0) when the project moved to GitHub. Build is
+# still local via `dotnet build` per the README; if/when build moves
+# to CI, add a build job alongside this one.
+
+name: Secrets scan
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  gitleaks:
+    name: gitleaks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so PR scans cover every commit in the PR,
+          # not just the merge result.
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Pinned for pipeline reproducibility; matches the version
+          # used during the 2026-04-28 pre-release audit. Bump when
+          # you want newer detection rules / fixes.
+          GITLEAKS_VERSION: 8.30.1
