@@ -1,4 +1,4 @@
-# Normalize committer/author identities so git log, GitLab, and any
+# Normalize committer/author identities so git log, GitHub, and any
 # other tool consistently shows the canonical "Christophe Barlieb"
 # name for commits that were authored under a Windows machine name.
 # Non-destructive — commit objects themselves are unchanged; this

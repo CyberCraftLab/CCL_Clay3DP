@@ -2,7 +2,7 @@
 
 Last refreshed 2026-05-03 against `main` at `v1.2.0-alpha` (merge commit `b8e2be9`). Reflects all settings-ui work shipped in that release: slices 1, 2a, 2b, 2d, 2e, 2f, 3, 5a, 5b, 5c.
 
-This document is meant to be printed and pinned next to the workstation. Each diagram is a Mermaid block — render in VS Code (Mermaid extension), GitHub/GitLab, or paste into <https://mermaid.live> to view/export PNG.
+This document is meant to be printed and pinned next to the workstation. Each diagram is a Mermaid block — render in VS Code (Mermaid extension), GitHub, or paste into <https://mermaid.live> to view/export PNG.
 
 ---
 
@@ -353,6 +353,6 @@ All shipped in v1.2.0-alpha (2026-05-03).
 Pending after v1.2.0-alpha:
 
 - **Slice 2c** — calibration database (CSV in `CCL_Clay3DP/Materials/`, schema covers shrinkage + water-% experiments + nozzle observations).
-- **Slice 4** — Tool/Nozzle section expansion. Aligns with GitLab #12 (drop-down for various nozzles).
+- **Slice 4** — Tool/Nozzle section expansion. Aligns with #12 (drop-down for various nozzles).
 - **Chamotte %** field on Material section — supplier-label data, affects max wall height + nozzle wear.
 - **RoboDK launch reliability** — closed at release time (self-resolved during testing); track recurrence via the temp log path.

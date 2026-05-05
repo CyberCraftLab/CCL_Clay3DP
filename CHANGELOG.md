@@ -122,7 +122,7 @@ across slices 1, 2a–2f, 3, and 5a–5c.
   dialog. Reflects what the section actually configures.
 - **Nozzle dropdown moved out of Robot section** into its own
   "Tool / Nozzle" group. Placeholder for the planned nozzle-
-  parameter expansion (GitLab #12).
+  parameter expansion (#12).
 - **All panel-originated popups now centered on the active
   screen**. Previously anchored to the docked panel — when the
   panel was narrow or on a screen edge, popups (build-volume
@@ -141,7 +141,7 @@ across slices 1, 2a–2f, 3, and 5a–5c.
 
 ## [1.1.1-alpha] — 2026-04-25
 
-Polish release rolling up GitLab issues #1, #2, #4, #5, #6, #7, #8, #9
+Polish release rolling up issues #1, #2, #4, #5, #6, #7, #8, #9
 plus a critical Outer Wall Bracing fix and several side-of-mouth
 quality-of-life additions. Issue #3 (Deconstruct) is the only
 original-list item still pending and will land in a later release.

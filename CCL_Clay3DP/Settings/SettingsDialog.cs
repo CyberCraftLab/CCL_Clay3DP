@@ -291,7 +291,7 @@ namespace CCL_Clay3DP.Settings
             // Nozzle dropdown lives in its own group (split out from Robot
             // section in the landscape redesign). Section is intentionally
             // sparse — expansion (diameter, tip offset, etc.) tracked under
-            // GitLab issue #12.
+            // issue #12.
             var toolGroup = new GroupBox
             {
                 Text = "Tool / Nozzle",
