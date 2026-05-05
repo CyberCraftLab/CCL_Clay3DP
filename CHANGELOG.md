@@ -287,7 +287,7 @@ original-list item still pending and will land in a later release.
   rename any `3DP_<...>` machining project back to `3DP_Template`,
   delete generated programs, and resave.
 
-[1.1.1-alpha]: https://gitlab.oth-regensburg.de/bac39641/ccl_clay3dp/-/tags/v1.1.1-alpha
+[1.1.1-alpha]: https://github.com/CyberCraftLab/CCL_Clay3DP/releases/tag/v1.1.1-alpha
 
 ---
 
