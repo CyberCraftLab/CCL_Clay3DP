@@ -133,6 +133,14 @@ namespace CCL_Clay3DP.Models
         // range 4..500 enforced at the UI.
         public int BracingContactPoints { get; set; } = 60;
 
+        // Bracing pattern selector (Issue #11 slice C). When false the
+        // bracing is a sharp triangle-wave zigzag; when true it's a smooth
+        // cosine wave with the same contact-point count (peaks = wall
+        // kisses, troughs = inner anchors). The sinusoidal path is gentler
+        // on robot acceleration since there are no corner reversals.
+        // Ignored unless OuterWallBracing is on.
+        public bool SinusoidalBracing { get; set; } = false;
+
         // Spiral-slice only — ignored when SpiralSlice is false. When true the
         // build plate tilts so the tool follows the spiral curve like an
         // airplane: fuselage along the curve tangent T, wings along the

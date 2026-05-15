@@ -50,6 +50,7 @@ namespace CCL_Clay3DP.Settings
         private CheckBox _spiralSliceCheck;
         private CheckBox _outerWallBracingCheck;
         private NumericStepper _bracingContactPoints;
+        private CheckBox _sinusoidalBracingCheck;
         private CheckBox _spiralFollowsCurveNormalCheck;
         private NumericStepper _layerHeight;
         private DropDown _directionDropDown;
@@ -197,6 +198,16 @@ namespace CCL_Clay3DP.Settings
             // many points internally so the alternating outer/inner pattern
             // closes cleanly regardless of parity.
             _bracingContactPoints = CreateStepper(4, 500, 1, 0);
+            _sinusoidalBracingCheck = new CheckBox
+            {
+                Text = "Sinusoidal bracing (off = zigzag)",
+                ToolTip =
+                    "When checked, the bracing follows a smooth cosine wave " +
+                    "(peaks = wall kisses, troughs = inner anchors) instead of " +
+                    "a sharp triangle-wave zigzag. Smoother robot motion — no " +
+                    "corner reversals — at the cost of denser internal sampling. " +
+                    "Same contact-point count either way.",
+            };
             _spiralFollowsCurveNormalCheck = new CheckBox
             {
                 Text = "Spiral follows curve normal (Spiral Slice only)",
@@ -237,6 +248,7 @@ namespace CCL_Clay3DP.Settings
                             "you can count by eye in the viewport. Decoupled from " +
                             "Frames per layer so bracing density is independent of " +
                             "toolpath sampling."),
+                        new TableRow(null, _sinusoidalBracingCheck),
                         new TableRow(null, _spiralFollowsCurveNormalCheck),
                         LabeledRow("Layer height (mm)", _layerHeight,
                             "Vertical distance between layers. For clay, typically " +
@@ -564,6 +576,7 @@ namespace CCL_Clay3DP.Settings
             if (clampedBracingPts < 4) clampedBracingPts = 4;
             if (clampedBracingPts > 500) clampedBracingPts = 500;
             _bracingContactPoints.Value = clampedBracingPts;
+            _sinusoidalBracingCheck.Checked = _settings.Helix.SinusoidalBracing;
 
             // Robot
             _feedRate.Value = _settings.Robot.FeedRate;
@@ -619,6 +632,7 @@ namespace CCL_Clay3DP.Settings
             _settings.Helix.DirectionCCW = _directionDropDown.SelectedIndex == 0;
             _settings.Helix.FramesPerLayer = (int)_framesPerLayer.Value;
             _settings.Helix.BracingContactPoints = (int)_bracingContactPoints.Value;
+            _settings.Helix.SinusoidalBracing = _sinusoidalBracingCheck.Checked ?? false;
 
             // Robot
             _settings.Robot.FeedRate = _feedRate.Value;
@@ -695,6 +709,7 @@ namespace CCL_Clay3DP.Settings
             }
             bool bracingActive = !spiral && (_outerWallBracingCheck.Checked ?? false);
             _bracingContactPoints.Enabled = bracingActive;
+            _sinusoidalBracingCheck.Enabled = bracingActive;
         }
 
         /// <summary>

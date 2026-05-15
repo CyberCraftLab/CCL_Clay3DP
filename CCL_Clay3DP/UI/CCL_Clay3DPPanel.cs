@@ -1460,7 +1460,10 @@ namespace CCL_Clay3DP.UI
                 double wallOffset = ClayBeadGeometry.ComputeWidth(
                     _settings.Clay.BeadDiameter, _settings.Helix.LayerHeight) * 0.5;
                 const double previewArrowLength = 5.0;
-                BakePreviewArrows(contours, numPoints, previewArrowLength, false, wallOffset);
+                bool previewSinusoidal = _settings.Helix.SinusoidalBracing;
+                int previewContactPoints = _settings.Helix.BracingContactPoints;
+                BakePreviewArrows(contours, numPoints, previewArrowLength, false,
+                    wallOffset, previewSinusoidal, previewContactPoints);
                 RhinoApp.Wait();
 
                 bool flipInward = false;
@@ -1477,7 +1480,8 @@ namespace CCL_Clay3DP.UI
                 if (flipInward)
                 {
                     ClearLayerObjects(RhinoDoc.ActiveDoc, "3DP::Bracing Vectors");
-                    BakePreviewArrows(contours, numPoints, previewArrowLength, true, wallOffset);
+                    BakePreviewArrows(contours, numPoints, previewArrowLength, true,
+                        wallOffset, previewSinusoidal, previewContactPoints);
                     RhinoApp.Wait();
                 }
 
@@ -1503,12 +1507,20 @@ namespace CCL_Clay3DP.UI
                 var goodContours = new List<Curve>();
                 var results = new List<Zigzag.SimpleZigzagResult>();
                 int skipped = 0;
+                // Pattern selector (Issue #11 slice C). Sinusoidal generator
+                // takes contact-point count directly (one period per touch);
+                // zigzag generator takes 2× (alternating outer/inner).
+                bool sinusoidal = _settings.Helix.SinusoidalBracing;
+                int contactPoints = _settings.Helix.BracingContactPoints;
                 for (int i = 0; i < contours.Count; i++)
                 {
                     try
                     {
-                        var r = Zigzag.ZigzagGenerator.BuildSingleContour(
-                            contours[i], numPoints, distance, flipInward, wallOffset);
+                        var r = sinusoidal
+                            ? Zigzag.ZigzagGenerator.BuildSinusoidalSingleContour(
+                                contours[i], contactPoints, distance, flipInward, wallOffset)
+                            : Zigzag.ZigzagGenerator.BuildSingleContour(
+                                contours[i], numPoints, distance, flipInward, wallOffset);
                         results.Add(r);
                         goodContours.Add(contours[i]);
                     }
@@ -2019,7 +2031,7 @@ namespace CCL_Clay3DP.UI
         /// </summary>
         private void BakePreviewArrows(
             List<Curve> contours, int numPoints, double length, bool flip,
-            double wallOffset = 0.0)
+            double wallOffset = 0.0, bool sinusoidal = false, int contactPoints = 0)
         {
             var doc = RhinoDoc.ActiveDoc;
             if (doc == null) return;
@@ -2041,8 +2053,11 @@ namespace CCL_Clay3DP.UI
                 if (contour == null) continue;
                 try
                 {
-                    var r = Zigzag.ZigzagGenerator.BuildSingleContour(
-                        contour, numPoints, length, flip, wallOffset);
+                    var r = sinusoidal
+                        ? Zigzag.ZigzagGenerator.BuildSinusoidalSingleContour(
+                            contour, contactPoints, length, flip, wallOffset)
+                        : Zigzag.ZigzagGenerator.BuildSingleContour(
+                            contour, numPoints, length, flip, wallOffset);
                     int n = Math.Min(r.OuterPoints.Count, r.InnerPoints.Count);
                     for (int k = 0; k < n; k++)
                     {
