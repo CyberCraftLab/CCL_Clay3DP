@@ -1441,8 +1441,14 @@ namespace CCL_Clay3DP.UI
                 }
 
                 // Outer Wall Bracing: preview inward arrows so the user can
-                // flip the side before picking the offset distance.
-                int numPoints = _settings.Helix.FramesPerLayer;
+                // flip the side before picking the offset distance. Contact-
+                // point count is decoupled from FramesPerLayer (Issue #11)
+                // so bracing density can be tuned independently of toolpath
+                // sampling. BracingContactPoints means "number of times the
+                // bracing touches the wall" — we double it for the generator
+                // so each pair (outer-touch, inner-anchor) accounts for one
+                // wall contact, matching what the user counts by eye.
+                int numPoints = 2 * _settings.Helix.BracingContactPoints;
                 const double previewArrowLength = 5.0;
                 BakePreviewArrows(contours, numPoints, previewArrowLength, false);
                 RhinoApp.Wait();

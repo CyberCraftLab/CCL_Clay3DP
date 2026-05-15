@@ -122,8 +122,16 @@ namespace CCL_Clay3DP.Models
         // Layer-slice only — ignored when SpiralSlice is true. Generates a
         // zigzag bracing pattern attached to the outer wall, anchored to a
         // virtual inner offset (computed but neither baked nor printed).
-        // FramesPerLayer also controls the zigzag point count in this mode.
         public bool OuterWallBracing { get; set; } = false;
+
+        // Number of times the bracing toolpath touches the outer wall
+        // around each layer when OuterWallBracing is on. Visually = the
+        // number of "kisses" the bracing makes with the wall, countable
+        // by eye in the viewport. The generator samples 2× this many
+        // points internally (alternating outer/inner) so each touch pairs
+        // with one inner anchor. Decoupled from FramesPerLayer (Issue #11);
+        // range 4..500 enforced at the UI.
+        public int BracingContactPoints { get; set; } = 60;
 
         // Spiral-slice only — ignored when SpiralSlice is false. When true the
         // build plate tilts so the tool follows the spiral curve like an

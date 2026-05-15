@@ -49,6 +49,7 @@ namespace CCL_Clay3DP.Settings
         // spiral interpolator and stays in the model with default 0.
         private CheckBox _spiralSliceCheck;
         private CheckBox _outerWallBracingCheck;
+        private NumericStepper _bracingContactPoints;
         private CheckBox _spiralFollowsCurveNormalCheck;
         private NumericStepper _layerHeight;
         private DropDown _directionDropDown;
@@ -190,6 +191,12 @@ namespace CCL_Clay3DP.Settings
                     "the outer wall, anchored to a virtual inner offset. Improves " +
                     "rigidity of layered prints.",
             };
+            _outerWallBracingCheck.CheckedChanged +=
+                (s, e) => UpdateToolpathFieldsEnabled();
+            // Any integer 4..500 is valid — the generator samples 2× this
+            // many points internally so the alternating outer/inner pattern
+            // closes cleanly regardless of parity.
+            _bracingContactPoints = CreateStepper(4, 500, 1, 0);
             _spiralFollowsCurveNormalCheck = new CheckBox
             {
                 Text = "Spiral follows curve normal (Spiral Slice only)",
@@ -223,6 +230,13 @@ namespace CCL_Clay3DP.Settings
                             "Default 3 - more = stronger adhesion but more material and time."),
                         new TableRow(null, _spiralSliceCheck),
                         new TableRow(null, _outerWallBracingCheck),
+                        LabeledRow("Bracing contact points (4-500)",
+                            _bracingContactPoints,
+                            "Number of times the bracing toolpath touches the outer " +
+                            "wall around each layer — i.e. the number of \"kisses\" " +
+                            "you can count by eye in the viewport. Decoupled from " +
+                            "Frames per layer so bracing density is independent of " +
+                            "toolpath sampling."),
                         new TableRow(null, _spiralFollowsCurveNormalCheck),
                         LabeledRow("Layer height (mm)", _layerHeight,
                             "Vertical distance between layers. For clay, typically " +
@@ -543,6 +557,13 @@ namespace CCL_Clay3DP.Settings
             _layerHeight.Value = _settings.Helix.LayerHeight;
             _directionDropDown.SelectedIndex = _settings.Helix.DirectionCCW ? 0 : 1;
             _framesPerLayer.Value = _settings.Helix.FramesPerLayer;
+            // Clamp imported value to [4,500] so an out-of-spec settings.json
+            // doesn't trip the stepper. No parity constraint — the generator
+            // doubles this internally, guaranteeing an even sample count.
+            int clampedBracingPts = _settings.Helix.BracingContactPoints;
+            if (clampedBracingPts < 4) clampedBracingPts = 4;
+            if (clampedBracingPts > 500) clampedBracingPts = 500;
+            _bracingContactPoints.Value = clampedBracingPts;
 
             // Robot
             _feedRate.Value = _settings.Robot.FeedRate;
@@ -597,6 +618,7 @@ namespace CCL_Clay3DP.Settings
             _settings.Helix.LayerHeight = _layerHeight.Value;
             _settings.Helix.DirectionCCW = _directionDropDown.SelectedIndex == 0;
             _settings.Helix.FramesPerLayer = (int)_framesPerLayer.Value;
+            _settings.Helix.BracingContactPoints = (int)_bracingContactPoints.Value;
 
             // Robot
             _settings.Robot.FeedRate = _feedRate.Value;
@@ -651,6 +673,7 @@ namespace CCL_Clay3DP.Settings
         /// <summary>
         /// Gray out fields that only apply to one toolpath mode:
         ///  - Outer Wall Bracing: layer-slice only → disabled AND auto-unchecked when Spiral Slice
+        ///  - Bracing contact points: only when Layer Slice AND bracing is on
         ///  - Spiral follows curve normal: spiral-only → disabled AND auto-unchecked when Layer Slice
         /// </summary>
         private void UpdateToolpathFieldsEnabled()
@@ -670,6 +693,8 @@ namespace CCL_Clay3DP.Settings
                 _spiralFollowsCurveNormalCheck.Checked = false;
                 _suppressSpiralNormalWarning = false;
             }
+            bool bracingActive = !spiral && (_outerWallBracingCheck.Checked ?? false);
+            _bracingContactPoints.Enabled = bracingActive;
         }
 
         /// <summary>
