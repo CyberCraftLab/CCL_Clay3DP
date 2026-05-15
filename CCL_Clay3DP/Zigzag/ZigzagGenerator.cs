@@ -42,10 +42,12 @@ namespace CCL_Clay3DP.Zigzag
         private const double CloseEndpointTol = 0.001;
 
         public static SimpleZigzagResult BuildSingleContour(
-            Curve contour, int numPoints, double inwardDistance, bool flipInward = false)
+            Curve contour, int numPoints, double inwardDistance,
+            bool flipInward = false, double wallOffset = 0.0)
         {
             if (contour == null) throw new Exception("Contour is null");
             if (inwardDistance <= 0) throw new Exception("Inward distance must be positive");
+            if (wallOffset < 0) throw new Exception("Wall offset must be non-negative");
             if (numPoints < 4) throw new Exception("Need at least 4 points");
             if (numPoints % 2 != 0) numPoints++; // even N closes the zigzag cleanly
 
@@ -109,8 +111,15 @@ namespace CCL_Clay3DP.Zigzag
                     : new Vector3d(tan.Y, -tan.X, 0);
                 if (flipInward) inwardDir = -inwardDir;
 
-                outer.Add(p);
-                inner.Add(p + inwardDir * inwardDistance);
+                // wallOffset shifts the bracing's wall-contact point inward
+                // from the contour centerline so the bracing bead's outer
+                // edge tangentially meets the outer-wall bead at the
+                // contour centerline ("french kiss" overlap — Issue #11
+                // slice B). Inner anchor follows by the same offset, so
+                // the user-facing inwardDistance is the tooth depth measured
+                // from the kiss point — not from the contour.
+                outer.Add(p + inwardDir * wallOffset);
+                inner.Add(p + inwardDir * (wallOffset + inwardDistance));
             }
 
             // Zigzag alternation. For closed curves append start to close the
