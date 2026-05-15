@@ -1441,10 +1441,29 @@ namespace CCL_Clay3DP.UI
                 }
 
                 // Outer Wall Bracing: preview inward arrows so the user can
-                // flip the side before picking the offset distance.
-                int numPoints = _settings.Helix.FramesPerLayer;
+                // flip the side before picking the offset distance. Contact-
+                // point count is decoupled from FramesPerLayer (Issue #11)
+                // so bracing density can be tuned independently of toolpath
+                // sampling. BracingContactPoints means "number of times the
+                // bracing touches the wall" — we double it for the generator
+                // so each pair (outer-touch, inner-anchor) accounts for one
+                // wall contact, matching what the user counts by eye.
+                int numPoints = 2 * _settings.Helix.BracingContactPoints;
+                // Issue #11 slice B: "french kiss" bead overlap. The bracing's
+                // wall-contact points sit HALF a bead width inboard from the
+                // contour centerline so the bracing bead's outer edge is
+                // tangent to the outer-wall bead's *centerline* (the contour
+                // itself), not its inner edge. This penetrates the outer-
+                // wall bead by W/2 → solid structural bond instead of an
+                // edge-to-edge tap. Computed once per slice from the
+                // current bead diameter + layer height.
+                double wallOffset = ClayBeadGeometry.ComputeWidth(
+                    _settings.Clay.BeadDiameter, _settings.Helix.LayerHeight) * 0.5;
                 const double previewArrowLength = 5.0;
-                BakePreviewArrows(contours, numPoints, previewArrowLength, false);
+                bool previewSinusoidal = _settings.Helix.SinusoidalBracing;
+                int previewContactPoints = _settings.Helix.BracingContactPoints;
+                BakePreviewArrows(contours, numPoints, previewArrowLength, false,
+                    wallOffset, previewSinusoidal, previewContactPoints);
                 RhinoApp.Wait();
 
                 bool flipInward = false;
@@ -1461,7 +1480,8 @@ namespace CCL_Clay3DP.UI
                 if (flipInward)
                 {
                     ClearLayerObjects(RhinoDoc.ActiveDoc, "3DP::Bracing Vectors");
-                    BakePreviewArrows(contours, numPoints, previewArrowLength, true);
+                    BakePreviewArrows(contours, numPoints, previewArrowLength, true,
+                        wallOffset, previewSinusoidal, previewContactPoints);
                     RhinoApp.Wait();
                 }
 
@@ -1487,12 +1507,20 @@ namespace CCL_Clay3DP.UI
                 var goodContours = new List<Curve>();
                 var results = new List<Zigzag.SimpleZigzagResult>();
                 int skipped = 0;
+                // Pattern selector (Issue #11 slice C). Sinusoidal generator
+                // takes contact-point count directly (one period per touch);
+                // zigzag generator takes 2× (alternating outer/inner).
+                bool sinusoidal = _settings.Helix.SinusoidalBracing;
+                int contactPoints = _settings.Helix.BracingContactPoints;
                 for (int i = 0; i < contours.Count; i++)
                 {
                     try
                     {
-                        var r = Zigzag.ZigzagGenerator.BuildSingleContour(
-                            contours[i], numPoints, distance, flipInward);
+                        var r = sinusoidal
+                            ? Zigzag.ZigzagGenerator.BuildSinusoidalSingleContour(
+                                contours[i], contactPoints, distance, flipInward, wallOffset)
+                            : Zigzag.ZigzagGenerator.BuildSingleContour(
+                                contours[i], numPoints, distance, flipInward, wallOffset);
                         results.Add(r);
                         goodContours.Add(contours[i]);
                     }
@@ -1789,25 +1817,14 @@ namespace CCL_Clay3DP.UI
                 }
 
                 // Cross-section dimensions. Layer height squashes the bead
-                // vertically; mass / cross-section-area conservation means
-                // it spreads horizontally:
-                //   π × (D/2)²  =  π × (W/2) × (H/2)
-                //   →  W  =  D² / H
-                // When H == D the bead stays circular (W = D); when H < D
-                // it widens into an ellipse with minor axis vertical.
-                double widthRadius, heightRadius;
-                if (Math.Abs(layerHeight - diameter) < 1e-6)
-                {
-                    // Circle — preserved exactly so the existing optimised
-                    // CreateFromCurvePipe path is used.
-                    widthRadius  = diameter * 0.5;
-                    heightRadius = diameter * 0.5;
-                }
-                else
-                {
-                    widthRadius  = (diameter * diameter) / (2.0 * layerHeight);
-                    heightRadius = layerHeight * 0.5;
-                }
+                // vertically; mass / cross-section-area conservation gives
+                // width via ClayBeadGeometry.ComputeWidth (single source
+                // of truth shared with the Outer Wall Bracing kiss offset).
+                double widthRadius  = ClayBeadGeometry.ComputeWidth(diameter, layerHeight) * 0.5;
+                double heightRadius = layerHeight * 0.5;
+                // When H == D the helper returns D, so widthRadius ==
+                // heightRadius == D/2 and we route through the optimised
+                // circular CreateFromCurvePipe path below.
                 bool elliptical = Math.Abs(widthRadius - heightRadius) > 1e-6;
 
                 // Source layers: covers every mode that produces a toolpath
@@ -2013,7 +2030,8 @@ namespace CCL_Clay3DP.UI
         /// can see which side the algorithm picked as inward.
         /// </summary>
         private void BakePreviewArrows(
-            List<Curve> contours, int numPoints, double length, bool flip)
+            List<Curve> contours, int numPoints, double length, bool flip,
+            double wallOffset = 0.0, bool sinusoidal = false, int contactPoints = 0)
         {
             var doc = RhinoDoc.ActiveDoc;
             if (doc == null) return;
@@ -2035,8 +2053,11 @@ namespace CCL_Clay3DP.UI
                 if (contour == null) continue;
                 try
                 {
-                    var r = Zigzag.ZigzagGenerator.BuildSingleContour(
-                        contour, numPoints, length, flip);
+                    var r = sinusoidal
+                        ? Zigzag.ZigzagGenerator.BuildSinusoidalSingleContour(
+                            contour, contactPoints, length, flip, wallOffset)
+                        : Zigzag.ZigzagGenerator.BuildSingleContour(
+                            contour, numPoints, length, flip, wallOffset);
                     int n = Math.Min(r.OuterPoints.Count, r.InnerPoints.Count);
                     for (int k = 0; k < n; k++)
                     {

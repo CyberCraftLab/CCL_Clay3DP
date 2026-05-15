@@ -122,8 +122,24 @@ namespace CCL_Clay3DP.Models
         // Layer-slice only — ignored when SpiralSlice is true. Generates a
         // zigzag bracing pattern attached to the outer wall, anchored to a
         // virtual inner offset (computed but neither baked nor printed).
-        // FramesPerLayer also controls the zigzag point count in this mode.
         public bool OuterWallBracing { get; set; } = false;
+
+        // Number of times the bracing toolpath touches the outer wall
+        // around each layer when OuterWallBracing is on. Visually = the
+        // number of "kisses" the bracing makes with the wall, countable
+        // by eye in the viewport. The generator samples 2× this many
+        // points internally (alternating outer/inner) so each touch pairs
+        // with one inner anchor. Decoupled from FramesPerLayer (Issue #11);
+        // range 4..500 enforced at the UI.
+        public int BracingContactPoints { get; set; } = 60;
+
+        // Bracing pattern selector (Issue #11 slice C). When false the
+        // bracing is a sharp triangle-wave zigzag; when true it's a smooth
+        // cosine wave with the same contact-point count (peaks = wall
+        // kisses, troughs = inner anchors). The sinusoidal path is gentler
+        // on robot acceleration since there are no corner reversals.
+        // Ignored unless OuterWallBracing is on.
+        public bool SinusoidalBracing { get; set; } = false;
 
         // Spiral-slice only — ignored when SpiralSlice is false. When true the
         // build plate tilts so the tool follows the spiral curve like an

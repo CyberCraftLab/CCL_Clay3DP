@@ -42,10 +42,12 @@ namespace CCL_Clay3DP.Zigzag
         private const double CloseEndpointTol = 0.001;
 
         public static SimpleZigzagResult BuildSingleContour(
-            Curve contour, int numPoints, double inwardDistance, bool flipInward = false)
+            Curve contour, int numPoints, double inwardDistance,
+            bool flipInward = false, double wallOffset = 0.0)
         {
             if (contour == null) throw new Exception("Contour is null");
             if (inwardDistance <= 0) throw new Exception("Inward distance must be positive");
+            if (wallOffset < 0) throw new Exception("Wall offset must be non-negative");
             if (numPoints < 4) throw new Exception("Need at least 4 points");
             if (numPoints % 2 != 0) numPoints++; // even N closes the zigzag cleanly
 
@@ -109,8 +111,15 @@ namespace CCL_Clay3DP.Zigzag
                     : new Vector3d(tan.Y, -tan.X, 0);
                 if (flipInward) inwardDir = -inwardDir;
 
-                outer.Add(p);
-                inner.Add(p + inwardDir * inwardDistance);
+                // wallOffset shifts the bracing's wall-contact point inward
+                // from the contour centerline so the bracing bead's outer
+                // edge tangentially meets the outer-wall bead at the
+                // contour centerline ("french kiss" overlap — Issue #11
+                // slice B). Inner anchor follows by the same offset, so
+                // the user-facing inwardDistance is the tooth depth measured
+                // from the kiss point — not from the contour.
+                outer.Add(p + inwardDir * wallOffset);
+                inner.Add(p + inwardDir * (wallOffset + inwardDistance));
             }
 
             // Zigzag alternation. For closed curves append start to close the
@@ -140,6 +149,135 @@ namespace CCL_Clay3DP.Zigzag
                 InnerPoints = inner,
                 InnerCurve = new PolylineCurve(innerLoop),
                 Zigzag = new PolylineCurve(zz),
+                IsClosed = isClosed,
+            };
+        }
+
+        // Discretization density for the sinusoidal path: how many
+        // polyline samples we emit per full cosine period (= per pair of
+        // wall touch + inner anchor). 12 → a sample every 30° of phase,
+        // smooth enough that the polyline visually reads as a sine curve
+        // even on coarse zoom, without blowing up frame counts downstream.
+        private const int SinusoidalSamplesPerPeriod = 12;
+
+        /// <summary>
+        /// Smooth-cosine bracing variant of <see cref="BuildSingleContour"/>.
+        /// Emits a closed (or open) polyline that swings inward from the
+        /// contour according to:
+        ///
+        ///     offset(s) = wallOffset + (A/2) · (1 − cos(2π·N·s/L))
+        ///
+        /// where N = <paramref name="contactPoints"/>, A = <paramref name="inwardDistance"/>,
+        /// s = arclength along the contour, L = total contour length.
+        /// Peaks of the cosine (cos=+1 → offset = wallOffset) are the wall
+        /// kisses; troughs (cos=−1 → offset = wallOffset + A) are the inner
+        /// anchors. One period per contact point, so N wall touches around
+        /// the contour. Internally sampled at <see cref="SinusoidalSamplesPerPeriod"/>
+        /// points per period so the robot toolpath reads as a smooth wave
+        /// (no corner reversals → gentler on accel/decel).
+        ///
+        /// OuterPoints returned = the N peaks (= wall touches).
+        /// InnerPoints returned = the N troughs (= inner anchors).
+        /// </summary>
+        public static SimpleZigzagResult BuildSinusoidalSingleContour(
+            Curve contour, int contactPoints, double inwardDistance,
+            bool flipInward = false, double wallOffset = 0.0)
+        {
+            if (contour == null) throw new Exception("Contour is null");
+            if (inwardDistance <= 0) throw new Exception("Inward distance must be positive");
+            if (wallOffset < 0) throw new Exception("Wall offset must be non-negative");
+            if (contactPoints < 2) throw new Exception("Need at least 2 contact points");
+
+            bool isClosed = contour.IsClosed
+                || contour.PointAtStart.DistanceTo(contour.PointAtEnd) < CloseEndpointTol;
+
+            if (isClosed && !contour.IsClosed)
+            {
+                if (!contour.MakeClosed(CloseEndpointTol))
+                    isClosed = false;
+            }
+
+            // Mirror BuildSingleContour's seam handling so the wave peaks
+            // stack across layers instead of drifting around the contour.
+            bool isCCW = true;
+            if (isClosed)
+            {
+                var orient = contour.ClosedCurveOrientation(Vector3d.ZAxis);
+                isCCW = orient != CurveOrientation.Clockwise;
+
+                var areaProps = AreaMassProperties.Compute(contour);
+                if (areaProps != null)
+                {
+                    var c = areaProps.Centroid;
+                    var seamTarget = new Point3d(c.X + 10000, c.Y, c.Z);
+                    if (contour.ClosestPoint(seamTarget, out double seamT))
+                        contour.ChangeClosedCurveSeam(seamT);
+                }
+            }
+
+            int N = contactPoints;
+            int K = SinusoidalSamplesPerPeriod;
+            int totalSamples = N * K;
+
+            // DivideByCount: closed → N params, open → N+1. Same convention
+            // as BuildSingleContour.
+            var ts = contour.DivideByCount(totalSamples, true);
+            if (ts == null || ts.Length < totalSamples)
+                throw new Exception("Could not divide contour into equal parts");
+
+            int count = ts.Length;
+            var samples = new List<Point3d>(count);
+            var peaks = new List<Point3d>(N);
+            var troughs = new List<Point3d>(N);
+            double halfAmplitude = inwardDistance * 0.5;
+
+            for (int j = 0; j < count; j++)
+            {
+                double t = ts[j];
+                Point3d p = contour.PointAt(t);
+                Vector3d tan = contour.TangentAt(t);
+                tan.Z = 0;
+                if (!tan.Unitize())
+                {
+                    samples.Add(p);
+                    continue;
+                }
+
+                Vector3d inwardDir = isCCW
+                    ? new Vector3d(-tan.Y, tan.X, 0)
+                    : new Vector3d(tan.Y, -tan.X, 0);
+                if (flipInward) inwardDir = -inwardDir;
+
+                // phase = 2π · j / K — independent of N. j=0,K,2K,… land
+                // on peaks (cos=1 → offset=wallOffset = kiss); j=K/2,3K/2,…
+                // land on troughs (cos=−1 → offset=wallOffset+A = anchor).
+                double phase = 2.0 * Math.PI * j / K;
+                double offset = wallOffset + halfAmplitude * (1.0 - Math.Cos(phase));
+                var pt = p + inwardDir * offset;
+                samples.Add(pt);
+
+                // Pull out the peaks / troughs by phase position so the
+                // OuterPoints / InnerPoints visualizations show N each,
+                // independent of K.
+                if (j % K == 0) peaks.Add(pt);
+                else if (K % 2 == 0 && j % K == K / 2) troughs.Add(pt);
+            }
+
+            // Closure dup — same convention as the zigzag generator so the
+            // robot returns to its starting kiss after each layer.
+            if (isClosed) samples.Add(samples[0]);
+
+            // Inner curve through the troughs only (analog to the zigzag's
+            // innerLoop). Not printed; useful as a debug overlay.
+            var innerLoop = new List<Point3d>(troughs);
+            if (isClosed && innerLoop.Count > 0) innerLoop.Add(innerLoop[0]);
+
+            return new SimpleZigzagResult
+            {
+                OuterPoints = peaks,
+                InnerPoints = troughs,
+                InnerCurve = innerLoop.Count >= 2 ? new PolylineCurve(innerLoop) : null,
+                Zigzag = new PolylineCurve(samples),
                 IsClosed = isClosed,
             };
         }

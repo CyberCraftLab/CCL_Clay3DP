@@ -52,10 +52,15 @@ configuration in RoboDK.
    - **Spiral Slice** — continuous spiral between horizontal contours
      (vase mode, no Z-seam).
    - **Layer Slice** — discrete planar layer contours. With the optional
-     **Outer Wall Bracing** flag, each layer also gets a triangle-wave
-     bracing rib anchored to an inward-offset projection (the
-     projection itself is not baked or printed, only the outer wall
-     and the bracing). Robot print order per layer is
+     **Outer Wall Bracing** flag, each layer also gets a bracing rib
+     anchored to an inward-offset projection (the projection itself is
+     not baked or printed, only the outer wall and the bracing). The
+     bracing pattern is either a sharp triangle-wave **zigzag** (default)
+     or a smooth **cosine wave** (`Sinusoidal bracing` toggle); both
+     share the same contact-point count and "french kiss" half-bead
+     overlap with the outer-wall bead at each touch point. The number of
+     contact points is set independently of the toolpath sampling density
+     (`Bracing contact points`, Issue #11). Robot print order per layer is
      **Outer Toolpath → Bracing Toolpath**, then up to the next layer.
      Outer Wall Bracing only runs on ruled / extrudable geometry
      (cylinders, prisms, cones, planar extrusions); the algorithm
@@ -153,9 +158,12 @@ CCL_Clay3DP/
 │  ├─ PrintabilityResult.cs      Score container + issue report
 │  └─ HeatmapDisplay.cs          Vertex-colored mesh overlay in viewport
 ├─ Zigzag/
-│  └─ ZigzagGenerator.cs         Outer Wall Bracing generator: triangle-wave
-│                                weave anchored to an inward in-plane projection,
-│                                with hairpin trim for concave geometry
+│  └─ ZigzagGenerator.cs         Outer Wall Bracing generators: triangle-wave
+│                                weave (BuildSingleContour) or smooth cosine
+│                                (BuildSinusoidalSingleContour). Both anchor
+│                                to an inward in-plane projection, apply a
+│                                half-bead kiss offset (Issue #11), and the
+│                                zigzag adds hairpin trim for concave geometry
 └─ RoboDK/
    ├─ FrameSerializer.cs         Frames + settings → temp JSON
    └─ RoboDKSubprocess.cs        Generates & runs Python 3 script via RoboDK's
@@ -172,7 +180,7 @@ settings) removes the others on the next Slice.
 |---|---|---|
 | `3DP::Spiral Toolpath` | The spiral curve (Spiral mode) | yes |
 | `3DP::Outer Toolpath` | Outer wall curve per layer (Layer mode) | yes |
-| `3DP::Bracing Toolpath` | Triangle-wave rib per layer (Layer + Bracing) | yes |
+| `3DP::Bracing Toolpath` | Zigzag or sinusoidal rib per layer (Layer + Bracing) | yes |
 | `3DP::Bracing Vectors` | Inward-direction arrows (Layer + Bracing) | no (flip preview) |
 | `3DP::Bracing Outer Points` | Sample points on outer wall (Layer + Bracing) | no |
 | `3DP::Bracing Inner Points` | Sample points on inward projection (Layer + Bracing) | no |
@@ -294,9 +302,10 @@ Rhino via `_PlugInManager → Install…`.
    - **Clay material**: preset (Porcelain / Stoneware / Earthenware) or
      custom bead diameter, max overhang, bond ratio, density.
    - **Toolpath**: Spiral Slice (vase mode) or Layer Slice; Outer Wall
-     Bracing (Layer mode only, ruled-geometry only); Spiral follows
-     curve normal (Spiral mode only); layer height; frames per layer;
-     start angle; CCW/CW direction.
+     Bracing (Layer mode only, ruled-geometry only); Bracing contact
+     points (4–500, independent of Frames per layer); Sinusoidal bracing
+     (smooth cosine path vs. zigzag); Spiral follows curve normal (Spiral
+     mode only); layer height; frames per layer; CCW/CW direction.
    - **Robot / printer**: feed rate (mm/s), travel speed, spindle S
      value, nozzle tool (T10/T11/T12), RoboDK paths.
    - **Build Volume (mm)**: X min/max, Y min/max, Z height of the cell
