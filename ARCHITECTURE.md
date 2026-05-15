@@ -22,6 +22,7 @@ CCL_Clay3DP/
 │   ├── BaseSettings.cs            # Multi-layer raft (Issue #10)
 │   ├── RobotSettings.cs           # Feed rate, spindle, nozzle, RoboDK paths
 │   ├── Parameters.cs              # GeometrySelection, BuildVolumeSettings, HelixParameters, HeightParameters
+│   ├── ClayBeadGeometry.cs        # Bead-width helper (W = D²/H); shared by viz + bracing kiss offset
 │   └── ClayPresets.cs             # Porcelain / Stoneware / Earthenware presets
 ├── Core/                           # Geometry pipeline primitives
 │   ├── GeometrySelector.cs        # Rhino object picker (Brep/Surface/Mesh)
@@ -40,7 +41,8 @@ CCL_Clay3DP/
 │   ├── FrameSerializer.cs         # SpiralResult.Frames → JSON for the Python script
 │   └── RoboDKSubprocess.cs        # Runs the Python script via cmd.exe; Python connects to RoboDK
 └── Zigzag/                         # Outer Wall Bracing (Layer Slice mode)
-    └── ...
+    └── ZigzagGenerator.cs          # Triangle-wave + cosine-wave bracing generators
+                                    # (BuildSingleContour, BuildSinusoidalSingleContour)
 ```
 
 **Dependency direction (lower depends on higher, never the reverse):**
@@ -268,6 +270,8 @@ classDiagram
         int FramesPerLayer
         bool SpiralSlice
         bool OuterWallBracing
+        int BracingContactPoints
+        bool SinusoidalBracing
         bool SpiralFollowsCurveNormal
         double StartAngle
     }
