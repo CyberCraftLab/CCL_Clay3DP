@@ -1446,7 +1446,8 @@ namespace CCL_Clay3DP.UI
                     // Cache for Analyze: sample outer contours + build +Z-up
                     // frames so Clay / Robot / Both all work in this mode.
                     var pts = new List<Point3d>();
-                    foreach (var c in contours) AddCurvePoints(c, pts);
+                    foreach (var c in contours)
+                        AddCurvePoints(c, pts, _settings.Helix.FrameSpacingMm);
                     _lastGeometry = selection;
                     _lastResult = new SpiralResult
                     {
@@ -1578,9 +1579,9 @@ namespace CCL_Clay3DP.UI
                 for (int i = 0; i < goodContours.Count; i++)
                 {
                     if (goodContours[i] != null)
-                        AddCurvePoints(goodContours[i], layerPts);
+                        AddCurvePoints(goodContours[i], layerPts, _settings.Helix.FrameSpacingMm);
                     if (results[i].Zigzag != null)
-                        AddCurvePoints(results[i].Zigzag, layerPts);
+                        AddCurvePoints(results[i].Zigzag, layerPts, _settings.Helix.FrameSpacingMm);
                 }
 
                 _lastGeometry = selection;
@@ -1655,25 +1656,48 @@ namespace CCL_Clay3DP.UI
         }
 
         /// <summary>
-        /// Pull points from a curve for Layer-mode Analyze caching. Polylines
-        /// contribute their vertices directly; smooth curves are sampled at
-        /// ~2 mm spacing. Duplicate closing vertex on closed polylines is
-        /// skipped so frame tangents at the seam don't degenerate.
+        /// Walk a Layer-mode toolpath curve and emit points at uniform
+        /// <paramref name="spacingMm"/> arc-length intervals (Issue #22).
+        /// Applies to slice contours, bracing zigzag, and any other
+        /// per-layer curve — every closed loop prints at the same bead
+        /// density as the spiral mode. For closed curves the seam tick
+        /// is de-duplicated so frame tangents don't degenerate where the
+        /// polyline returns to its start.
         /// </summary>
-        private static void AddCurvePoints(Curve c, List<Point3d> acc)
+        private static void AddCurvePoints(Curve c, List<Point3d> acc, double spacingMm)
         {
-            if (c == null) return;
-            if (c.TryGetPolyline(out Polyline pl) && pl.Count > 0)
-            {
-                int count = pl.IsClosed ? pl.Count - 1 : pl.Count;
-                for (int i = 0; i < count; i++) acc.Add(pl[i]);
-                return;
-            }
+            if (c == null || spacingMm <= 0.0) return;
             double len = c.GetLength();
-            int n = Math.Max(32, (int)(len / 2.0));
-            var ts = c.DivideByCount(n, false);
-            if (ts == null) return;
-            foreach (var t in ts) acc.Add(c.PointAt(t));
+            if (len <= 0.0) return;
+
+            var local = new List<Point3d>();
+            if (len <= spacingMm)
+            {
+                local.Add(c.PointAtStart);
+                if (!c.IsClosed) local.Add(c.PointAtEnd);
+            }
+            else
+            {
+                double[] ts = c.DivideByLength(spacingMm, true);
+                if (ts != null)
+                    foreach (var t in ts) local.Add(c.PointAt(t));
+
+                if (!c.IsClosed)
+                {
+                    Point3d end = c.PointAtEnd;
+                    if (local.Count == 0 || local[local.Count - 1].DistanceTo(end) > 1e-3)
+                        local.Add(end);
+                }
+                else if (local.Count >= 2 &&
+                    local[0].DistanceTo(local[local.Count - 1]) < 1e-3)
+                {
+                    // Some Rhino builds include both T0 and T1 for closed
+                    // curves; they coincide spatially.
+                    local.RemoveAt(local.Count - 1);
+                }
+            }
+
+            acc.AddRange(local);
         }
 
         /// <summary>
