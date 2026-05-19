@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using Rhino.Geometry;
@@ -92,19 +93,27 @@ namespace CCL_Clay3DP.Core
 
         /// <summary>
         /// Sample the skirt curve into a list of frames the robot can
-        /// follow. Sampling is by uniform arc-length so the per-frame
-        /// spacing is consistent regardless of where the curve's
-        /// internal seam lies. The last frame duplicates the first so
-        /// the loop closes back on itself when RoboDK traces the curve.
+        /// follow. Sampling is by uniform arc-length at frameSpacingMm
+        /// (Issue #22): the sample count is derived from the skirt's
+        /// perimeter, so the bead density matches the spiral toolpath
+        /// regardless of part size. The last frame duplicates the first
+        /// so the loop closes back on itself when RoboDK traces the curve.
         ///
         /// Frame normals are ALWAYS +Z world (build plate up). The
         /// SpiralFollowsCurveNormal toggle does not apply to the skirt
         /// — it sits flat on the plate by construction.
         /// </summary>
-        public static List<Plane> SampleSkirtFrames(Curve skirt, int sampleCount)
+        public static List<Plane> SampleSkirtFrames(Curve skirt, double frameSpacingMm)
         {
             var frames = new List<Plane>();
-            if (skirt == null || sampleCount < 4) return frames;
+            if (skirt == null || frameSpacingMm <= 0.0) return frames;
+
+            double perimeter = skirt.GetLength();
+            if (perimeter <= 0.0) return frames;
+
+            // Sample count = perimeter / spacing, but never below 4 — a
+            // closed loop needs at least four corners to be meaningful.
+            int sampleCount = Math.Max(4, (int)Math.Ceiling(perimeter / frameSpacingMm));
 
             // DivideByCount(N, true) returns N+1 parameters, with the last
             // one at curve.Domain.T1 — for a closed curve that coincides

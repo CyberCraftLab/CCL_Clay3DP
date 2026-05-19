@@ -106,12 +106,20 @@ namespace CCL_Clay3DP.Models
         public double LayerHeight { get; set; } = 4.0;
         // StartAngle is no longer exposed in the SettingsDialog (Issue #16
         // — was struck through as unused) but the spiral interpolator still
-        // reads it, so the field stays here. Default 0 means "start the
-        // spiral at the contour's natural curve start"; that's been the
-        // de-facto behavior since the dialog never had a useful preset.
+        // reads it, so the field stays here. Degrees, measured from +X
+        // around each contour's centroid: 0 = +X, 90 = +Y. Sets where the
+        // spiral starts on the bottom contour.
         public double StartAngle { get; set; } = 0.0;
         public bool DirectionCCW { get; set; } = true;
-        public int FramesPerLayer { get; set; } = 360;
+
+        // Target arc-length spacing between consecutive toolpath frames, in
+        // millimetres (Issue #22). Replaces the legacy FramesPerLayer count:
+        // the old normalized-parameter sampling produced uneven physical
+        // spacing whenever contour perimeters varied within or between
+        // layers. Sampling by mm gives uniform extrusion regardless of
+        // part shape. Applied to spiral toolpath, skirt loop, and base
+        // layer contours so every closed loop has consistent bead density.
+        public double FrameSpacingMm { get; set; } = 10.0;
 
         // Toolpath mode. When true, the Slice button produces a continuous
         // spiral (original behavior). When false, it produces discrete
@@ -129,8 +137,8 @@ namespace CCL_Clay3DP.Models
         // number of "kisses" the bracing makes with the wall, countable
         // by eye in the viewport. The generator samples 2× this many
         // points internally (alternating outer/inner) so each touch pairs
-        // with one inner anchor. Decoupled from FramesPerLayer (Issue #11);
-        // range 4..500 enforced at the UI.
+        // with one inner anchor. Decoupled from the spiral frame spacing
+        // (Issue #11); range 4..500 enforced at the UI.
         public int BracingContactPoints { get; set; } = 60;
 
         // Bracing pattern selector (Issue #11 slice C). When false the

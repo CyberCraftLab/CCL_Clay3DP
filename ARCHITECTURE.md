@@ -267,7 +267,7 @@ classDiagram
     class HelixParameters {
         double LayerHeight
         bool DirectionCCW
-        int FramesPerLayer
+        double FrameSpacingMm
         bool SpiralSlice
         bool OuterWallBracing
         int BracingContactPoints

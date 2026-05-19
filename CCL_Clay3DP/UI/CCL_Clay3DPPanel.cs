@@ -190,6 +190,7 @@ namespace CCL_Clay3DP.UI
         {
             "3DP::Contours",
             "3DP::Spiral Toolpath",
+            "3DP::Spiral Points",
             "3DP::Heatmap",
             "3DP::Outer Toolpath",
             "3DP::Bracing Outer Points",
@@ -653,13 +654,19 @@ namespace CCL_Clay3DP.UI
 
                 SetStatus($"Found {contours.Count} contours. Interpolating spiral...");
 
-                // 3) Generate spiral toolpath
+                // 3) Generate spiral toolpath. Brep + mesh are passed so
+                // the interpolator can re-slice internally for surface
+                // fidelity, independent of the user's print layer height
+                // (which is the spiral's helical pitch).
                 var spiralPoints = SpiralInterpolator.Interpolate(
                     contours,
-                    _settings.Helix.FramesPerLayer,
+                    _settings.Helix.FrameSpacingMm,
+                    _settings.Helix.LayerHeight,
                     _settings.Helix.StartAngle,
                     _settings.Helix.DirectionCCW,
-                    reportProgress);
+                    workingBrep,
+                    workingMesh,
+                    progress: reportProgress);
 
                 reportProgress(0.1);
                 SetStatus($"Computing {spiralPoints.Count} frames...");
@@ -722,7 +729,7 @@ namespace CCL_Clay3DP.UI
                     BakeSkirt(RhinoDoc.ActiveDoc, skirt);
                     _lastResult.SkirtCurve = skirt;
                     _lastResult.SkirtFrames = SkirtBuilder.SampleSkirtFrames(
-                        skirt, _settings.Helix.FramesPerLayer);
+                        skirt, _settings.Helix.FrameSpacingMm);
                 }
 
                 Rhino.UI.StatusBar.UpdateProgressMeter(100, true);
@@ -759,6 +766,25 @@ namespace CCL_Clay3DP.UI
                 attrs.LayerIndex = spiralLayer;
                 attrs.Name = "SpiralToolpath";
                 doc.Objects.AddCurve(result.SpiralCurve, attrs);
+            }
+
+            // Bake the raw toolpath points on a dedicated layer so the
+            // user can visually verify frame spacing and on-surface
+            // placement. Each ToolpathPoint becomes one point object —
+            // the gap between consecutive points equals FrameSpacingMm.
+            if (result.ToolpathPoints != null && result.ToolpathPoints.Count > 0)
+            {
+                int pointsLayer = EnsureLayer(doc, "3DP::Spiral Points",
+                    System.Drawing.Color.Yellow);
+                ClearLayerObjects(doc, "3DP::Spiral Points");
+
+                var pointAttrs = new ObjectAttributes
+                {
+                    LayerIndex = pointsLayer,
+                    Name = "SpiralPoint",
+                };
+                foreach (var pt in result.ToolpathPoints)
+                    doc.Objects.AddPoint(pt, pointAttrs);
             }
 
             doc.Views.Redraw();
@@ -1094,7 +1120,7 @@ namespace CCL_Clay3DP.UI
                 _settings.Base,
                 _settings.Helix.LayerHeight,
                 _settings.Clay.BeadDiameter,
-                _settings.Helix.FramesPerLayer);
+                _settings.Helix.FrameSpacingMm);
 
             if (baseResult.LayerCount == 0)
                 return (selection.Brep, selection.Mesh, null, 0.0);
@@ -1413,14 +1439,15 @@ namespace CCL_Clay3DP.UI
                     {
                         skirtNoBrace = SkirtBuilder.BuildSkirt(contours[0]);
                         skirtNoBraceFrames = SkirtBuilder.SampleSkirtFrames(
-                            skirtNoBrace, _settings.Helix.FramesPerLayer);
+                            skirtNoBrace, _settings.Helix.FrameSpacingMm);
                     }
                     BakeSkirt(RhinoDoc.ActiveDoc, skirtNoBrace);
 
                     // Cache for Analyze: sample outer contours + build +Z-up
                     // frames so Clay / Robot / Both all work in this mode.
                     var pts = new List<Point3d>();
-                    foreach (var c in contours) AddCurvePoints(c, pts);
+                    foreach (var c in contours)
+                        AddCurvePoints(c, pts, _settings.Helix.FrameSpacingMm);
                     _lastGeometry = selection;
                     _lastResult = new SpiralResult
                     {
@@ -1442,9 +1469,9 @@ namespace CCL_Clay3DP.UI
 
                 // Outer Wall Bracing: preview inward arrows so the user can
                 // flip the side before picking the offset distance. Contact-
-                // point count is decoupled from FramesPerLayer (Issue #11)
-                // so bracing density can be tuned independently of toolpath
-                // sampling. BracingContactPoints means "number of times the
+                // point count is decoupled from the spiral frame spacing
+                // (Issue #11) so bracing density can be tuned independently
+                // of toolpath sampling. BracingContactPoints means "number of times the
                 // bracing touches the wall" — we double it for the generator
                 // so each pair (outer-touch, inner-anchor) accounts for one
                 // wall contact, matching what the user counts by eye.
@@ -1512,13 +1539,20 @@ namespace CCL_Clay3DP.UI
                 // zigzag generator takes 2× (alternating outer/inner).
                 bool sinusoidal = _settings.Helix.SinusoidalBracing;
                 int contactPoints = _settings.Helix.BracingContactPoints;
+                // Shared reference center for sinusoidal phase: the mean
+                // of all contour centroids. Anchoring peaks to absolute
+                // angles around this point — instead of per-layer arc-
+                // length — makes contact points stack vertically across
+                // layers even when contour shape varies.
+                Point3d? sharedCenter = SpiralInterpolator.ComputeSharedCentroid(contours);
                 for (int i = 0; i < contours.Count; i++)
                 {
                     try
                     {
                         var r = sinusoidal
                             ? Zigzag.ZigzagGenerator.BuildSinusoidalSingleContour(
-                                contours[i], contactPoints, distance, flipInward, wallOffset)
+                                contours[i], contactPoints, distance, flipInward,
+                                wallOffset, sharedCenter)
                             : Zigzag.ZigzagGenerator.BuildSingleContour(
                                 contours[i], numPoints, distance, flipInward, wallOffset);
                         results.Add(r);
@@ -1552,9 +1586,9 @@ namespace CCL_Clay3DP.UI
                 for (int i = 0; i < goodContours.Count; i++)
                 {
                     if (goodContours[i] != null)
-                        AddCurvePoints(goodContours[i], layerPts);
+                        AddCurvePoints(goodContours[i], layerPts, _settings.Helix.FrameSpacingMm);
                     if (results[i].Zigzag != null)
-                        AddCurvePoints(results[i].Zigzag, layerPts);
+                        AddCurvePoints(results[i].Zigzag, layerPts, _settings.Helix.FrameSpacingMm);
                 }
 
                 _lastGeometry = selection;
@@ -1587,7 +1621,7 @@ namespace CCL_Clay3DP.UI
                     BakeSkirt(RhinoDoc.ActiveDoc, skirtBraced);
                     _lastResult.SkirtCurve = skirtBraced;
                     _lastResult.SkirtFrames = SkirtBuilder.SampleSkirtFrames(
-                        skirtBraced, _settings.Helix.FramesPerLayer);
+                        skirtBraced, _settings.Helix.FrameSpacingMm);
                 }
 
                 SetStatus(WithTranslationNote(
@@ -1629,25 +1663,48 @@ namespace CCL_Clay3DP.UI
         }
 
         /// <summary>
-        /// Pull points from a curve for Layer-mode Analyze caching. Polylines
-        /// contribute their vertices directly; smooth curves are sampled at
-        /// ~2 mm spacing. Duplicate closing vertex on closed polylines is
-        /// skipped so frame tangents at the seam don't degenerate.
+        /// Walk a Layer-mode toolpath curve and emit points at uniform
+        /// <paramref name="spacingMm"/> arc-length intervals (Issue #22).
+        /// Applies to slice contours, bracing zigzag, and any other
+        /// per-layer curve — every closed loop prints at the same bead
+        /// density as the spiral mode. For closed curves the seam tick
+        /// is de-duplicated so frame tangents don't degenerate where the
+        /// polyline returns to its start.
         /// </summary>
-        private static void AddCurvePoints(Curve c, List<Point3d> acc)
+        private static void AddCurvePoints(Curve c, List<Point3d> acc, double spacingMm)
         {
-            if (c == null) return;
-            if (c.TryGetPolyline(out Polyline pl) && pl.Count > 0)
-            {
-                int count = pl.IsClosed ? pl.Count - 1 : pl.Count;
-                for (int i = 0; i < count; i++) acc.Add(pl[i]);
-                return;
-            }
+            if (c == null || spacingMm <= 0.0) return;
             double len = c.GetLength();
-            int n = Math.Max(32, (int)(len / 2.0));
-            var ts = c.DivideByCount(n, false);
-            if (ts == null) return;
-            foreach (var t in ts) acc.Add(c.PointAt(t));
+            if (len <= 0.0) return;
+
+            var local = new List<Point3d>();
+            if (len <= spacingMm)
+            {
+                local.Add(c.PointAtStart);
+                if (!c.IsClosed) local.Add(c.PointAtEnd);
+            }
+            else
+            {
+                double[] ts = c.DivideByLength(spacingMm, true);
+                if (ts != null)
+                    foreach (var t in ts) local.Add(c.PointAt(t));
+
+                if (!c.IsClosed)
+                {
+                    Point3d end = c.PointAtEnd;
+                    if (local.Count == 0 || local[local.Count - 1].DistanceTo(end) > 1e-3)
+                        local.Add(end);
+                }
+                else if (local.Count >= 2 &&
+                    local[0].DistanceTo(local[local.Count - 1]) < 1e-3)
+                {
+                    // Some Rhino builds include both T0 and T1 for closed
+                    // curves; they coincide spatially.
+                    local.RemoveAt(local.Count - 1);
+                }
+            }
+
+            acc.AddRange(local);
         }
 
         /// <summary>
@@ -2048,6 +2105,10 @@ namespace CCL_Clay3DP.UI
                 ObjectDecoration = ObjectDecoration.EndArrowhead,
             };
 
+            // Same shared center the toolpath generation will use, so the
+            // preview arrows land where the real contact points will be.
+            Point3d? sharedCenter = SpiralInterpolator.ComputeSharedCentroid(contours);
+
             foreach (var contour in contours)
             {
                 if (contour == null) continue;
@@ -2055,7 +2116,7 @@ namespace CCL_Clay3DP.UI
                 {
                     var r = sinusoidal
                         ? Zigzag.ZigzagGenerator.BuildSinusoidalSingleContour(
-                            contour, contactPoints, length, flip, wallOffset)
+                            contour, contactPoints, length, flip, wallOffset, sharedCenter)
                         : Zigzag.ZigzagGenerator.BuildSingleContour(
                             contour, numPoints, length, flip, wallOffset);
                     int n = Math.Min(r.OuterPoints.Count, r.InnerPoints.Count);

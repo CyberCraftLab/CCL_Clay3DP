@@ -44,6 +44,14 @@ namespace CCL_Clay3DP.Settings
             // Migrate legacy settings on first load after rename
             MigrateLegacySettingsIfNeeded();
 
+            // Note on field renames: Newtonsoft drops unknown JSON keys
+            // silently on deserialize, so legacy fields removed from the
+            // model (e.g. HelixParameters.FramesPerLayer in Issue #22)
+            // just disappear and the new field gets its default. We do
+            // not try to convert old counts to FrameSpacingMm because the
+            // mapping depends on per-part perimeter — defaulting is the
+            // honest behavior.
+
             if (!File.Exists(ConfigFile))
                 return new PipelineSettings();
 

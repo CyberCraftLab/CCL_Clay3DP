@@ -303,9 +303,10 @@ Rhino via `_PlugInManager → Install…`.
      custom bead diameter, max overhang, bond ratio, density.
    - **Toolpath**: Spiral Slice (vase mode) or Layer Slice; Outer Wall
      Bracing (Layer mode only, ruled-geometry only); Bracing contact
-     points (4–500, independent of Frames per layer); Sinusoidal bracing
+     points (4–500, independent of Frame spacing); Sinusoidal bracing
      (smooth cosine path vs. zigzag); Spiral follows curve normal (Spiral
-     mode only); layer height; frames per layer; CCW/CW direction.
+     mode only); layer height; frame spacing in mm (uniform arc-length
+     between toolpath frames — Issue #22); CCW/CW direction.
    - **Robot / printer**: feed rate (mm/s), travel speed, spindle S
      value, nozzle tool (T10/T11/T12), RoboDK paths.
    - **Build Volume (mm)**: X min/max, Y min/max, Z height of the cell
