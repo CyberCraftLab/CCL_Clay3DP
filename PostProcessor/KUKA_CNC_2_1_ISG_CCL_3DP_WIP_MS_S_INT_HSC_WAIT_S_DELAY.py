@@ -146,10 +146,16 @@ class RobotPost(object):
 
     # ------------------ Retract spindle lookahead ------------------
     # Number of MoveL waypoints to back the S1 command up when a retract
-    # (MoveJ while extruder is on) is detected. Clay flow tapers over
-    # the last several print points; backing the S1 up by ~10 points
-    # has the bead pressure-drop complete before the lift-off move.
+    # is detected. Clay flow tapers over the last several print points;
+    # backing the S1 up by ~10 points has the bead pressure-drop complete
+    # before the lift-off move.
     RETRACT_LOOKAHEAD_POINTS = 10
+
+    # Speed ratio that classifies the upcoming MoveL as travel/retract.
+    # RoboDK's CNC import emits G0 rapids as fast MoveL (e.g. F6000) and
+    # G1 prints as slower MoveL (e.g. F3000); a jump above this ratio
+    # is the trigger to back up the S1.
+    RETRACT_SPEED_RATIO = 1.3
 
     # Internal state for lead compensation
     _EXTRUDER_ON = False
@@ -158,6 +164,7 @@ class RobotPost(object):
     _EXTRUDE_SEGS = []            # buffered extrusion-on linear segments for backtracking
     _LAST_EXTRUDER_S = 500.0      # last S value with S > 1 (= resume value after a retract)
     _PENDING_RESUME_S = None      # if set, next MoveL emits this S value to resume after retract
+    _LAST_MOVEL_SPEED = None      # speed (mm/min) of the previous MoveL — used for retract feed-jump detection
     
     MOVE_TYPE_NONE = -1
     MOVE_NAMES = []
@@ -371,15 +378,17 @@ class RobotPost(object):
     def _inject_extruder_off_n_points_back(self):
         """Insert an S1 line into PROG at the position of the MoveL that's
         RETRACT_LOOKAHEAD_POINTS waypoints back from the most recent one.
-        Falls back to emitting S1 inline at the current PROG end when the
-        buffered segment list is shorter than the lookahead (= we don't
-        have enough printed waypoints to back up by N)."""
+        If fewer than N waypoints are buffered (= the current print pass
+        is shorter than the desired lookahead), fall back to emitting S1
+        inline rather than at the very start of the pass — turning the
+        extruder off for the entire short contour would lose more than
+        it saves."""
         N = self.RETRACT_LOOKAHEAD_POINTS
-        if not self._EXTRUDE_SEGS or N < 1:
+        if N < 1 or not self._EXTRUDE_SEGS or len(self._EXTRUDE_SEGS) < N:
             self.addline('S1')
             self._EXTRUDE_SEGS = []
             return
-        idx = max(0, len(self._EXTRUDE_SEGS) - N)
+        idx = len(self._EXTRUDE_SEGS) - N
         line_i = self._EXTRUDE_SEGS[idx]['line_index']
         if line_i < 0 or line_i >= len(self.PROG):
             self.addline('S1')
@@ -418,11 +427,33 @@ class RobotPost(object):
         
     def MoveL(self, pose, joints, conf_RLF=None):
         """Add a linear movement"""
-        # Retract resume: first MoveL after a retract sequence. Re-issue
-        # the stashed S value before this print point fires so the
-        # extruder is flowing again when we land. _EXTRUDER_ON flips back
-        # on here too so subsequent MoveL calls buffer for lookahead.
-        if self._PENDING_RESUME_S is not None:
+        # ----- Retract spindle lookahead -----
+        # RoboDK's CNC import sends all moves (including rapids converted
+        # from G0) as MoveL, distinguished only by feed rate — typically
+        # F3000 for prints and F6000 for travel/retract/plunge. Detect
+        # retract entry/exit by comparing the incoming MoveL's speed to
+        # the previous MoveL's speed.
+        current_speed = self._LAST_F_MM_MIN
+        last_speed = self._LAST_MOVEL_SPEED
+
+        # Entry: speed jumped above RETRACT_SPEED_RATIO × last MoveL while
+        # extruding → back up the S1 by N points, stash the resume value.
+        if (self._EXTRUDER_ON
+                and self._PENDING_RESUME_S is None
+                and last_speed is not None
+                and last_speed > 0
+                and current_speed > last_speed * self.RETRACT_SPEED_RATIO):
+            self._inject_extruder_off_n_points_back()
+            self._PENDING_RESUME_S = self._LAST_EXTRUDER_S
+            self._EXTRUDER_ON = False
+
+        # Exit: a resume is pending and the speed has dropped back to a
+        # print-like value (= we're at the first MoveL after the plunge).
+        # Emit the stashed S before the MoveL line so the extruder is
+        # flowing again as the print point lands.
+        elif (self._PENDING_RESUME_S is not None
+                and last_speed is not None
+                and current_speed * self.RETRACT_SPEED_RATIO < last_speed):
             self.addline('S%d' % int(round(self._PENDING_RESUME_S)))
             self._PENDING_RESUME_S = None
             self._EXTRUDER_ON = True
@@ -460,11 +491,12 @@ class RobotPost(object):
             self._EXTRUDE_SEGS.append({'p0': self._LAST_XYZ, 'p1': _xyz, 'len': L, 'line_index': len(self.PROG)-1})
 
         self._LAST_XYZ = _xyz
-        
+        self._LAST_MOVEL_SPEED = current_speed
+
         # Remember the last pose
         self.LAST_POSE = pose
         self.LAST_JOINTS = joints
-        self.LAST_CONFIG = conf_RLF      
+        self.LAST_CONFIG = conf_RLF
         
     def MoveC(self, pose1, joints1, pose2, joints2, conf_RLF_1=None, conf_RLF_2=None):
         """Add a circular movement"""
