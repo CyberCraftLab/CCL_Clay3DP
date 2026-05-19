@@ -15,22 +15,22 @@
 using System;
 using System.Collections.Generic;
 using Rhino.Geometry;
-using Rhino.Geometry.Intersect;
 
 namespace CCL_Clay3DP.Core
 {
     /// <summary>
     /// Two-step spiral toolpath construction:
-    ///   1. Build one continuous on-surface spiral curve whose helical
-    ///      pitch is the user's LayerHeight (one full revolution per
-    ///      LayerHeight of Z). Surface fidelity comes from re-slicing
-    ///      the source brep/mesh at a fine Z pitch; angular fidelity
-    ///      comes from ray-casting each contour at the target spiral
-    ///      angle (which works correctly on non-convex / wavy contours,
-    ///      unlike arc-length parameter sampling).
-    ///   2. Walk that spiral curve from bottom to top at the user's
-    ///      FrameSpacingMm. The resulting points are uniformly spaced
-    ///      along arc length, on-surface, and Z-monotonic.
+    ///   1. Build one continuous spiral curve. Helical pitch = LayerHeight
+    ///      (one revolution per LayerHeight of Z). Surface fidelity comes
+    ///      from re-slicing the source brep/mesh at a fine pitch; angular
+    ///      consistency across layers comes from aligning each contour's
+    ///      seam to the +X-most point as seen from a shared centroid.
+    ///      Chord-blend samples are laterally projected onto the source
+    ///      surface where the surface is steep enough that the projection
+    ///      stays within LayerHeight/2 in Z.
+    ///   2. Walk the spiral curve from bottom to top at the user's
+    ///      FrameSpacingMm. The output points are uniformly spaced along
+    ///      arc length and Z-monotonic.
     /// </summary>
     public static class SpiralInterpolator
     {
@@ -58,6 +58,21 @@ namespace CCL_Clay3DP.Core
         /// deposits.
         /// </summary>
         public const double DefaultPathSlicePitchMm = 0.5;
+
+        /// <summary>
+        /// Distance, in mm, used to construct seam-alignment targets far
+        /// outside any plausible contour. Curve.ClosestPoint to a target
+        /// this far in seamDir resolves to the contour's extreme point in
+        /// that direction, which is what we want for the seam.
+        /// </summary>
+        private const double SeamRayDistanceMm = 10000.0;
+
+        /// <summary>
+        /// Spatial tolerance for de-duplicating coincident endpoints when
+        /// resampling closed curves — DivideByLength can return both T0
+        /// and T1 on closed curves, which collapse to the same XYZ.
+        /// </summary>
+        private const double PointDedupTolMm = 1e-3;
 
         /// <summary>
         /// Build a spiral toolpath whose helical pitch equals
@@ -110,19 +125,27 @@ namespace CCL_Clay3DP.Core
             var workingContours = RefineContoursIfPossible(
                 contours, brep, mesh, pathSlicePitchMm);
 
-            // A2. Precompute centroids once. Every dense sample ray-casts
-            // from its contour's centroid at the target angle, so angular
-            // alignment stays consistent across contours regardless of
-            // shape — no seam alignment or winding fix-up needed.
-            var centroids = ComputeCentroids(workingContours);
+            // A2. Align winding so walking parameter t forward = chosen
+            // winding direction (CCW/CW), and align seams via a SHARED
+            // centroid (mean of all per-layer centroids). With seams
+            // angularly aligned, parameter t=0 maps to the same angular
+            // column on every contour — arc-length sampling at the same
+            // t on adjacent contours yields chord blends that follow the
+            // actual perimeter, even for multi-lobe / wavy shapes where
+            // ray-cast-from-centroid would short-circuit across the part.
+            AlignContourDirections(workingContours, ccw);
+            Point3d sharedCentroid = ComputeSharedCentroid(workingContours);
+            AlignSeamPoints(workingContours, sharedCentroid, startAngleDegrees);
 
-            // A3. Sample the on-surface spiral. Spiral angle at height z
-            // is startAngle ± 2π · (z − zMin) / LayerHeight (sign from
-            // CCW/CW), so one full turn always corresponds to exactly
-            // LayerHeight of Z rise.
-            double startAngleRad = startAngleDegrees * Math.PI / 180.0;
-            var dense = BuildSpiralSamples(workingContours, centroids,
-                layerHeightMm, frameSpacingMm, startAngleRad, ccw, progress);
+            // A3. Sample the on-surface spiral. Each sample's parameter on
+            // the contour is t = ((z − zMin) / LayerHeight) mod 1 — one
+            // full revolution per LayerHeight of Z rise, regardless of
+            // how many fine slices we have. Where the source brep/mesh
+            // is available, each chord-blend point is laterally projected
+            // onto the surface (constrained to small Z deltas so the
+            // spiral stays monotonic in Z even on near-horizontal regions).
+            var dense = BuildSpiralSamples(workingContours,
+                layerHeightMm, frameSpacingMm, brep, mesh, progress);
             if (dense.Count < 2) return dense;
 
             // A4. Connect samples with a polyline. PolylineCurve (not a
@@ -148,21 +171,24 @@ namespace CCL_Clay3DP.Core
 
         /// <summary>
         /// Re-slice the source brep/mesh at <paramref name="pitchMm"/>
-        /// between the Z range of <paramref name="contours"/>. Returns the
-        /// original list unchanged when refining isn't a fidelity gain.
+        /// between the Z range of <paramref name="contours"/>. Always
+        /// returns a fresh list — even on the no-refinement paths it
+        /// copies the input, because the caller mutates the returned
+        /// list (winding flips, seam rotation) and must not corrupt the
+        /// caller's contour list.
         /// </summary>
         private static List<Curve> RefineContoursIfPossible(
             List<Curve> contours, Brep brep, Mesh mesh, double pitchMm)
         {
-            if (brep == null && mesh == null) return contours;
-            if (pitchMm <= 0.0) return contours;
+            if (brep == null && mesh == null) return new List<Curve>(contours);
+            if (pitchMm <= 0.0) return new List<Curve>(contours);
 
             double zMin = ContourZ(contours[0]);
             double zMax = ContourZ(contours[contours.Count - 1]);
-            if (zMax - zMin <= pitchMm) return contours;
+            if (zMax - zMin <= pitchMm) return new List<Curve>(contours);
 
             double existingPitch = (zMax - zMin) / (contours.Count - 1);
-            if (pitchMm >= existingPitch) return contours;
+            if (pitchMm >= existingPitch) return new List<Curve>(contours);
 
             var refined = new List<Curve>();
             for (double z = zMin; z <= zMax + 1e-6; z += pitchMm)
@@ -176,28 +202,31 @@ namespace CCL_Clay3DP.Core
                     refined.Add(sliced);
             }
 
-            return refined.Count >= 2 ? refined : contours;
+            return refined.Count >= 2 ? refined : new List<Curve>(contours);
         }
 
         /// <summary>
         /// Generate dense on-surface samples along the spiral. For each
         /// adjacent contour pair, emit K samples whose Z rises linearly
-        /// across the pair and whose angular position is computed from
-        /// absolute Z and the helical pitch — so one full turn always
-        /// corresponds to LayerHeight of Z, regardless of whether a
-        /// contour pair spans a full turn (print pitch) or a fraction
-        /// of one (fine slicing).
+        /// across the pair and whose contour parameter t advances such
+        /// that one full revolution corresponds to exactly LayerHeight
+        /// of Z rise (helical pitch). Within a pair, each sample is the
+        /// chord blend between the two bracketing contours, each
+        /// sampled at the same arc-length parameter t.
         ///
-        /// Within a pair, each sample is the chord blend between the two
-        /// bracketing contours, each ray-cast at the same angle from its
-        /// centroid. Chord deviation from the surface shrinks with the
-        /// contour spacing — fine slicing keeps it small even on wavy
-        /// organic meshes.
+        /// Arc-length parameterization walks the actual perimeter — so
+        /// multi-lobe / non-convex contours are traced correctly. Seam
+        /// alignment (done earlier, in <see cref="AlignSeamPoints"/>)
+        /// guarantees that the same t lands at the same angular column
+        /// on every contour, so chord blends stay close to the surface.
+        /// Chord deviation shrinks with contour spacing — fine slicing
+        /// keeps it small even on wavy organic meshes.
         /// </summary>
         private static List<Point3d> BuildSpiralSamples(
-            List<Curve> contours, List<Point3d> centroids,
+            List<Curve> contours,
             double layerHeightMm, double frameSpacingMm,
-            double startAngleRad, bool ccw, Action<double> progress)
+            Brep brep, Mesh mesh,
+            Action<double> progress)
         {
             var dense = new List<Point3d>();
             int totalPairs = contours.Count - 1;
@@ -223,16 +252,14 @@ namespace CCL_Clay3DP.Core
             int samplesPerPair = Math.Max(MinSamplesPerContourPair,
                 (int)Math.Ceiling(maxPerimeter * turnFractionPerPair / targetSpacingMm));
 
-            // Per-contour bbox diagonal cached so SampleByAngle doesn't
-            // recompute it on every sample.
-            var rayLengths = new double[contours.Count];
-            for (int i = 0; i < contours.Count; i++)
-            {
-                var bb = contours[i].GetBoundingBox(true);
-                rayLengths[i] = bb.IsValid ? bb.Diagonal.Length * 2.0 + 100.0 : 1000.0;
-            }
-
-            double windSign = ccw ? 1.0 : -1.0;
+            // Constrained projection threshold: how far the closest surface
+            // point's Z can differ from the chord-blend Z before we reject
+            // the projection. Half the user's LayerHeight is the safe band
+            // — closer than that and the surface is steep enough to project
+            // onto without crossing into a different layer; further than
+            // that and the projection is on a near-horizontal section that
+            // would yank the point onto a different layer entirely.
+            double projectionZTolerance = layerHeightMm * 0.5;
 
             for (int pair = 0; pair < totalPairs; pair++)
             {
@@ -247,90 +274,158 @@ namespace CCL_Clay3DP.Core
                 {
                     double zFrac = (double)k / samplesPerPair;
                     double z = zLo + (zHi - zLo) * zFrac;
-                    double angleRad = SpiralAngle(z, zMin, layerHeightMm, startAngleRad, windSign);
 
-                    Point3d? ptLo = SampleByAngle(lower, centroids[pair], rayLengths[pair], angleRad);
-                    Point3d? ptHi = SampleByAngle(upper, centroids[pair + 1], rayLengths[pair + 1], angleRad);
-                    if (!ptLo.HasValue || !ptHi.HasValue) continue;
+                    double turns = (z - zMin) / layerHeightMm;
+                    double t = turns - Math.Floor(turns);
 
-                    double x = ptLo.Value.X + (ptHi.Value.X - ptLo.Value.X) * zFrac;
-                    double y = ptLo.Value.Y + (ptHi.Value.Y - ptLo.Value.Y) * zFrac;
-                    dense.Add(new Point3d(x, y, z));
+                    Point3d ptLo = SampleAtArcLengthParameter(lower, t);
+                    Point3d ptHi = SampleAtArcLengthParameter(upper, t);
+
+                    double x = ptLo.X + (ptHi.X - ptLo.X) * zFrac;
+                    double y = ptLo.Y + (ptHi.Y - ptLo.Y) * zFrac;
+                    var pt = new Point3d(x, y, z);
+
+                    // Constrained lateral projection: where the surface is
+                    // steep, the closest surface point is at nearly the same
+                    // Z as our chord — adopt its XY so the bead hugs the
+                    // actual wall. Where the surface is near-horizontal,
+                    // the closest point jumps to a different layer; reject
+                    // the projection and keep the chord-blend (the price of
+                    // staying on a printable monotonic-Z spiral).
+                    pt = LaterallyProjectIfSafe(pt, brep, mesh, projectionZTolerance);
+
+                    dense.Add(pt);
                 }
             }
 
-            // Finish on the top contour at its spiral angle so the curve
-            // terminates on the actual surface, not mid-blend.
-            int topIdx = contours.Count - 1;
-            double angleTop = SpiralAngle(zMax, zMin, layerHeightMm, startAngleRad, windSign);
-            var topPt = SampleByAngle(contours[topIdx], centroids[topIdx],
-                rayLengths[topIdx], angleTop);
-            if (topPt.HasValue) dense.Add(topPt.Value);
+            // Finish on the top contour at the spiral's terminal parameter
+            // so the curve ends on the actual surface, not mid-blend.
+            var top = contours[contours.Count - 1];
+            double turnsTop = (zMax - zMin) / layerHeightMm;
+            double tTop = turnsTop - Math.Floor(turnsTop);
+            dense.Add(SampleAtArcLengthParameter(top, tTop));
 
             return dense;
         }
 
-        private static double SpiralAngle(double z, double zMin, double layerHeightMm,
-            double startAngleRad, double windSign)
+        /// <summary>
+        /// If the closest point on the brep/mesh has a Z within
+        /// <paramref name="zTolerance"/> of <paramref name="chord"/>, return a
+        /// new point with that surface point's XY and the chord's Z. Otherwise
+        /// return <paramref name="chord"/> unchanged. Z is always preserved so
+        /// the spiral stays monotonic in Z; the projection only slides the
+        /// point laterally onto the surface where doing so is safe.
+        /// </summary>
+        private static Point3d LaterallyProjectIfSafe(Point3d chord, Brep brep,
+            Mesh mesh, double zTolerance)
         {
-            double turnFrac = (z - zMin) / layerHeightMm;
-            return startAngleRad + windSign * turnFrac * 2.0 * Math.PI;
+            if (brep == null && mesh == null) return chord;
+
+            Point3d surface = Point3d.Unset;
+            if (brep != null)
+            {
+                var cp = brep.ClosestPoint(chord);
+                if (cp.IsValid) surface = cp;
+            }
+            if (!surface.IsValid && mesh != null)
+            {
+                var mp = mesh.ClosestMeshPoint(chord, 0.0);
+                if (mp != null && mp.Point.IsValid) surface = mp.Point;
+            }
+            if (!surface.IsValid) return chord;
+
+            if (Math.Abs(surface.Z - chord.Z) > zTolerance) return chord;
+            return new Point3d(surface.X, surface.Y, chord.Z);
         }
 
         /// <summary>
-        /// Find the outermost intersection of a ray from <paramref name="centroid"/>
-        /// at <paramref name="angleRad"/> with the contour. "Outermost" is the
-        /// farthest hit along the ray, which is the surface point in that
-        /// angular direction even when the contour is non-convex and the
-        /// ray would otherwise stab inward concavities first.
+        /// Sample a curve at a normalized arc-length parameter t ∈ [0, 1).
+        /// Falls back to the curve's domain mapping if Rhino can't resolve
+        /// the arc-length lookup (degenerate curves, mostly).
         /// </summary>
-        private static Point3d? SampleByAngle(Curve contour, Point3d centroid,
-            double rayLength, double angleRad)
+        private static Point3d SampleAtArcLengthParameter(Curve curve, double t)
         {
-            var dir = new Vector3d(Math.Cos(angleRad), Math.Sin(angleRad), 0);
-            var rayEnd = centroid + dir * rayLength;
-            rayEnd = new Point3d(rayEnd.X, rayEnd.Y, centroid.Z);
-            var ray = new LineCurve(centroid, rayEnd);
-
-            var events = Intersection.CurveCurve(ray, contour, 0.001, 0.001);
-            if (events == null || events.Count == 0) return null;
-
-            double farthestParam = double.MinValue;
-            Point3d best = Point3d.Unset;
-            for (int i = 0; i < events.Count; i++)
-            {
-                var ev = events[i];
-                if (!ev.IsPoint) continue;
-                if (ev.ParameterA > farthestParam)
-                {
-                    farthestParam = ev.ParameterA;
-                    best = ev.PointA;
-                }
-            }
-            return best.IsValid ? best : (Point3d?)null;
+            double len = curve.GetLength();
+            if (len > 0.0 && curve.LengthParameter(t * len, out double param))
+                return curve.PointAt(param);
+            return curve.PointAt(curve.Domain.ParameterAt(t));
         }
 
-        private static List<Point3d> ComputeCentroids(List<Curve> contours)
+        /// <summary>
+        /// Reverse contours whose closed-curve orientation doesn't match
+        /// the requested winding, so walking parameter t forward always
+        /// traces in the chosen direction (CCW or CW).
+        /// </summary>
+        private static void AlignContourDirections(List<Curve> contours, bool ccw)
         {
-            var list = new List<Point3d>(contours.Count);
+            foreach (var contour in contours)
+            {
+                var orientation = contour.ClosedCurveOrientation(Vector3d.ZAxis);
+                bool isCCW = orientation == CurveOrientation.CounterClockwise;
+                if (isCCW != ccw)
+                    contour.Reverse();
+            }
+        }
+
+        /// <summary>
+        /// Rotate each closed contour's parameterization so t=0 lands at
+        /// the +X-most point of the contour as seen from
+        /// <paramref name="sharedCentroid"/>, with <paramref name="startAngleDegrees"/>
+        /// rotating that reference direction. Using the SHARED centroid
+        /// (not each contour's own centroid) keeps seams angularly
+        /// aligned across layers even when individual contour centroids
+        /// shift with the surface.
+        /// </summary>
+        private static void AlignSeamPoints(List<Curve> contours,
+            Point3d sharedCentroid, double startAngleDegrees)
+        {
+            double angleRad = startAngleDegrees * Math.PI / 180.0;
+            var seamDir = new Vector3d(Math.Cos(angleRad), Math.Sin(angleRad), 0);
+
+            foreach (var contour in contours)
+            {
+                Point3d seamTarget = sharedCentroid + seamDir * SeamRayDistanceMm;
+                seamTarget = new Point3d(seamTarget.X, seamTarget.Y, contour.PointAtStart.Z);
+                if (contour.ClosestPoint(seamTarget, out double t))
+                    contour.ChangeClosedCurveSeam(t);
+            }
+        }
+
+        /// <summary>
+        /// Mean of all contours' area-centroids, projected to z=0. Used
+        /// as the shared anchor for seam alignment across layers. Falls
+        /// back to each contour's bbox center when AreaMassProperties
+        /// returns null. Returns Point3d.Origin when no contour has a
+        /// usable centroid or bbox (degenerate input).
+        ///
+        /// Public so the panel can reuse it for layer-mode bracing —
+        /// every consumer that wants to align angular positions across
+        /// a contour stack should anchor to the same shared centroid.
+        /// </summary>
+        public static Point3d ComputeSharedCentroid(List<Curve> contours)
+        {
+            double sumX = 0.0, sumY = 0.0;
+            int n = 0;
             foreach (var c in contours)
             {
+                if (c == null) continue;
+                Point3d centre;
                 var amp = AreaMassProperties.Compute(c);
                 if (amp != null)
                 {
-                    // Pin centroid to the contour's Z plane — AreaMassProperties
-                    // can drift by float noise.
-                    var ctr = amp.Centroid;
-                    list.Add(new Point3d(ctr.X, ctr.Y, c.PointAtStart.Z));
+                    centre = amp.Centroid;
                 }
                 else
                 {
-                    // Degenerate contour: bbox center is the safest fallback.
                     var bb = c.GetBoundingBox(true);
-                    list.Add(bb.IsValid ? bb.Center : c.PointAtStart);
+                    if (!bb.IsValid) continue;
+                    centre = bb.Center;
                 }
+                sumX += centre.X;
+                sumY += centre.Y;
+                n++;
             }
-            return list;
+            return n > 0 ? new Point3d(sumX / n, sumY / n, 0.0) : Point3d.Origin;
         }
 
         /// <summary>
@@ -360,7 +455,7 @@ namespace CCL_Clay3DP.Core
             }
 
             Point3d end = curve.PointAtEnd;
-            if (pts.Count == 0 || pts[pts.Count - 1].DistanceTo(end) > 1e-3)
+            if (pts.Count == 0 || pts[pts.Count - 1].DistanceTo(end) > PointDedupTolMm)
                 pts.Add(end);
 
             return pts;

@@ -41,6 +41,11 @@ namespace CCL_Clay3DP.Zigzag
         // Tolerance for "start==end" detection on curves that aren't flagged closed
         private const double CloseEndpointTol = 0.001;
 
+        // Far distance used to construct seam-alignment targets. The seam
+        // is then the contour's extreme point in the seamDir, via
+        // Curve.ClosestPoint to a target this far away.
+        private const double SeamRayDistanceMm = 10000.0;
+
         public static SimpleZigzagResult BuildSingleContour(
             Curve contour, int numPoints, double inwardDistance,
             bool flipInward = false, double wallOffset = 0.0)
@@ -74,7 +79,7 @@ namespace CCL_Clay3DP.Zigzag
                 if (areaProps != null)
                 {
                     var c = areaProps.Centroid;
-                    var seamTarget = new Point3d(c.X + 10000, c.Y, c.Z);
+                    var seamTarget = new Point3d(c.X + SeamRayDistanceMm, c.Y, c.Z);
                     if (contour.ClosestPoint(seamTarget, out double seamT))
                         contour.ChangeClosedCurveSeam(seamT);
                 }
@@ -172,16 +177,24 @@ namespace CCL_Clay3DP.Zigzag
         /// Peaks of the cosine (cos=+1 → offset = wallOffset) are the wall
         /// kisses; troughs (cos=−1 → offset = wallOffset + A) are the inner
         /// anchors. One period per contact point, so N wall touches around
-        /// the contour. Internally sampled at <see cref="SinusoidalSamplesPerPeriod"/>
-        /// points per period so the robot toolpath reads as a smooth wave
-        /// (no corner reversals → gentler on accel/decel).
+        /// the contour at evenly-spaced arc-length positions.
+        ///
+        /// <paramref name="sharedCenter"/> sets the seam alignment target:
+        /// each layer's contour is rotated so its seam (curve parameter 0)
+        /// lands at the +X-most point of the contour as seen from the
+        /// shared centre. With identical seam direction across layers,
+        /// arc-length-aligned peaks land at the same angular column on
+        /// every layer (modulo per-contour perimeter differences). When
+        /// the parameter is null, the per-contour area centroid is used —
+        /// the legacy behaviour, which let seams drift if centroids shifted.
         ///
         /// OuterPoints returned = the N peaks (= wall touches).
         /// InnerPoints returned = the N troughs (= inner anchors).
         /// </summary>
         public static SimpleZigzagResult BuildSinusoidalSingleContour(
             Curve contour, int contactPoints, double inwardDistance,
-            bool flipInward = false, double wallOffset = 0.0)
+            bool flipInward = false, double wallOffset = 0.0,
+            Point3d? sharedCenter = null)
         {
             if (contour == null) throw new Exception("Contour is null");
             if (inwardDistance <= 0) throw new Exception("Inward distance must be positive");
@@ -197,22 +210,30 @@ namespace CCL_Clay3DP.Zigzag
                     isClosed = false;
             }
 
-            // Mirror BuildSingleContour's seam handling so the wave peaks
-            // stack across layers instead of drifting around the contour.
+            // Seam alignment so peaks stack across layers (Issue #22 follow-up).
+            // The seam target is +X-far from sharedCenter when provided, or
+            // from the per-contour centroid as a fallback. Using a shared
+            // centre stops the seam drifting layer-to-layer when each
+            // contour's centroid wobbles in XY.
             bool isCCW = true;
             if (isClosed)
             {
                 var orient = contour.ClosedCurveOrientation(Vector3d.ZAxis);
                 isCCW = orient != CurveOrientation.Clockwise;
 
-                var areaProps = AreaMassProperties.Compute(contour);
-                if (areaProps != null)
+                Point3d seamRef;
+                if (sharedCenter.HasValue)
                 {
-                    var c = areaProps.Centroid;
-                    var seamTarget = new Point3d(c.X + 10000, c.Y, c.Z);
-                    if (contour.ClosestPoint(seamTarget, out double seamT))
-                        contour.ChangeClosedCurveSeam(seamT);
+                    seamRef = sharedCenter.Value;
                 }
+                else
+                {
+                    var amp = AreaMassProperties.Compute(contour);
+                    seamRef = amp?.Centroid ?? contour.PointAtStart;
+                }
+                var seamTarget = new Point3d(seamRef.X + SeamRayDistanceMm, seamRef.Y, seamRef.Z);
+                if (contour.ClosestPoint(seamTarget, out double seamT))
+                    contour.ChangeClosedCurveSeam(seamT);
             }
 
             int N = contactPoints;
@@ -256,19 +277,14 @@ namespace CCL_Clay3DP.Zigzag
                 var pt = p + inwardDir * offset;
                 samples.Add(pt);
 
-                // Pull out the peaks / troughs by phase position so the
-                // OuterPoints / InnerPoints visualizations show N each,
-                // independent of K.
                 if (j % K == 0) peaks.Add(pt);
                 else if (K % 2 == 0 && j % K == K / 2) troughs.Add(pt);
             }
 
-            // Closure dup — same convention as the zigzag generator so the
-            // robot returns to its starting kiss after each layer.
+            // Closure dup — robot returns to its starting kiss after each layer.
             if (isClosed) samples.Add(samples[0]);
 
-            // Inner curve through the troughs only (analog to the zigzag's
-            // innerLoop). Not printed; useful as a debug overlay.
+            // Inner curve through the troughs only — visualization overlay.
             var innerLoop = new List<Point3d>(troughs);
             if (isClosed && innerLoop.Count > 0) innerLoop.Add(innerLoop[0]);
 

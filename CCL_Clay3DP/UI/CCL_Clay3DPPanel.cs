@@ -1539,13 +1539,20 @@ namespace CCL_Clay3DP.UI
                 // zigzag generator takes 2× (alternating outer/inner).
                 bool sinusoidal = _settings.Helix.SinusoidalBracing;
                 int contactPoints = _settings.Helix.BracingContactPoints;
+                // Shared reference center for sinusoidal phase: the mean
+                // of all contour centroids. Anchoring peaks to absolute
+                // angles around this point — instead of per-layer arc-
+                // length — makes contact points stack vertically across
+                // layers even when contour shape varies.
+                Point3d? sharedCenter = SpiralInterpolator.ComputeSharedCentroid(contours);
                 for (int i = 0; i < contours.Count; i++)
                 {
                     try
                     {
                         var r = sinusoidal
                             ? Zigzag.ZigzagGenerator.BuildSinusoidalSingleContour(
-                                contours[i], contactPoints, distance, flipInward, wallOffset)
+                                contours[i], contactPoints, distance, flipInward,
+                                wallOffset, sharedCenter)
                             : Zigzag.ZigzagGenerator.BuildSingleContour(
                                 contours[i], numPoints, distance, flipInward, wallOffset);
                         results.Add(r);
@@ -2098,6 +2105,10 @@ namespace CCL_Clay3DP.UI
                 ObjectDecoration = ObjectDecoration.EndArrowhead,
             };
 
+            // Same shared center the toolpath generation will use, so the
+            // preview arrows land where the real contact points will be.
+            Point3d? sharedCenter = SpiralInterpolator.ComputeSharedCentroid(contours);
+
             foreach (var contour in contours)
             {
                 if (contour == null) continue;
@@ -2105,7 +2116,7 @@ namespace CCL_Clay3DP.UI
                 {
                     var r = sinusoidal
                         ? Zigzag.ZigzagGenerator.BuildSinusoidalSingleContour(
-                            contour, contactPoints, length, flip, wallOffset)
+                            contour, contactPoints, length, flip, wallOffset, sharedCenter)
                         : Zigzag.ZigzagGenerator.BuildSingleContour(
                             contour, numPoints, length, flip, wallOffset);
                     int n = Math.Min(r.OuterPoints.Count, r.InnerPoints.Count);
