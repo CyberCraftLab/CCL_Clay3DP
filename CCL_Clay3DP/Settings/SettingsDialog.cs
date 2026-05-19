@@ -54,7 +54,7 @@ namespace CCL_Clay3DP.Settings
         private CheckBox _spiralFollowsCurveNormalCheck;
         private NumericStepper _layerHeight;
         private DropDown _directionDropDown;
-        private NumericStepper _framesPerLayer;
+        private NumericStepper _frameSpacingMm;
 
         // Robot fields. Tilt mode / LeadAngle / VerticalBias were dead
         // config (no pipeline ever read them) — removed from both the
@@ -224,7 +224,7 @@ namespace CCL_Clay3DP.Settings
             _directionDropDown = new DropDown();
             _directionDropDown.Items.Add("CCW");
             _directionDropDown.Items.Add("CW");
-            _framesPerLayer = CreateStepper(36, 3600, 36, 0);
+            _frameSpacingMm = CreateStepper(0.1, 50.0, 0.5, 1);
 
             var spiralGroup = new GroupBox
             {
@@ -246,8 +246,8 @@ namespace CCL_Clay3DP.Settings
                             "Number of times the bracing toolpath touches the outer " +
                             "wall around each layer — i.e. the number of \"kisses\" " +
                             "you can count by eye in the viewport. Decoupled from " +
-                            "Frames per layer so bracing density is independent of " +
-                            "toolpath sampling."),
+                            "the spiral Frame spacing so bracing density is " +
+                            "independent of toolpath sampling."),
                         new TableRow(null, _sinusoidalBracingCheck),
                         new TableRow(null, _spiralFollowsCurveNormalCheck),
                         LabeledRow("Layer height (mm)", _layerHeight,
@@ -255,10 +255,12 @@ namespace CCL_Clay3DP.Settings
                             "0.5x-1.0x the bead diameter."),
                         LabeledRow("Direction", _directionDropDown,
                             "CCW: counter-clockwise spiral / contour winding. CW: clockwise."),
-                        LabeledRow("Frames per layer", _framesPerLayer,
-                            "Number of robot frames sampled per closed loop. Higher = " +
-                            "smoother motion at the cost of larger G-code files and " +
-                            "longer slice time. KUKA CNC has no per-program frame limit."),
+                        LabeledRow("Frame spacing (mm)", _frameSpacingMm,
+                            "Arc-length distance between consecutive robot frames " +
+                            "along the spiral, skirt, and base-layer contours. " +
+                            "Smaller = smoother motion at the cost of larger G-code " +
+                            "files and longer slice time. Applied uniformly so bead " +
+                            "deposition stays even regardless of part perimeter."),
                     },
                 },
             };
@@ -568,7 +570,13 @@ namespace CCL_Clay3DP.Settings
             _suppressSpiralNormalWarning = false;
             _layerHeight.Value = _settings.Helix.LayerHeight;
             _directionDropDown.SelectedIndex = _settings.Helix.DirectionCCW ? 0 : 1;
-            _framesPerLayer.Value = _settings.Helix.FramesPerLayer;
+            // Clamp imported value to [0.1, 50] so an out-of-spec settings.json
+            // (or a legacy file with no FrameSpacingMm at all — the default
+            // 10.0 sits inside the range) doesn't trip the stepper.
+            double clampedSpacing = _settings.Helix.FrameSpacingMm;
+            if (clampedSpacing < 0.1) clampedSpacing = 0.1;
+            if (clampedSpacing > 50.0) clampedSpacing = 50.0;
+            _frameSpacingMm.Value = clampedSpacing;
             // Clamp imported value to [4,500] so an out-of-spec settings.json
             // doesn't trip the stepper. No parity constraint — the generator
             // doubles this internally, guaranteeing an even sample count.
@@ -630,7 +638,7 @@ namespace CCL_Clay3DP.Settings
             _settings.Helix.SpiralFollowsCurveNormal = _spiralFollowsCurveNormalCheck.Checked ?? false;
             _settings.Helix.LayerHeight = _layerHeight.Value;
             _settings.Helix.DirectionCCW = _directionDropDown.SelectedIndex == 0;
-            _settings.Helix.FramesPerLayer = (int)_framesPerLayer.Value;
+            _settings.Helix.FrameSpacingMm = _frameSpacingMm.Value;
             _settings.Helix.BracingContactPoints = (int)_bracingContactPoints.Value;
             _settings.Helix.SinusoidalBracing = _sinusoidalBracingCheck.Checked ?? false;
 

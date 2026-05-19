@@ -99,8 +99,10 @@ namespace CCL_Clay3DP.Core
         /// pitch as the part body.</param>
         /// <param name="beadDiameter">Material bead diameter in mm.
         /// Drives infill line spacing.</param>
-        /// <param name="framesPerLayer">Frame count per closed loop
-        /// (skirt and per-layer contour). Mirrors HelixParameters.FramesPerLayer.</param>
+        /// <param name="frameSpacingMm">Target arc-length spacing between
+        /// frames on the skirt and on each base layer contour, in mm.
+        /// Mirrors HelixParameters.FrameSpacingMm so the base prints at
+        /// the same bead density as the part body (Issue #22).</param>
         /// <returns>BaseResult with frames and bake geometry. Returns
         /// an empty result (LayerCount=0, empty lists) if the input
         /// contour is unusable — caller treats that as "no base".</returns>
@@ -109,7 +111,7 @@ namespace CCL_Clay3DP.Core
             BaseSettings settings,
             double layerHeight,
             double beadDiameter,
-            int framesPerLayer)
+            double frameSpacingMm)
         {
             var result = new BaseResult { LayerHeight = layerHeight };
 
@@ -142,7 +144,7 @@ namespace CCL_Clay3DP.Core
             if (result.SkirtCurve != null)
             {
                 result.SkirtFrames = SkirtBuilder.SampleSkirtFrames(
-                    result.SkirtCurve, framesPerLayer);
+                    result.SkirtCurve, frameSpacingMm);
             }
 
             for (int i = 0; i < n; i++)
@@ -153,7 +155,7 @@ namespace CCL_Clay3DP.Core
                 var contour = footprint.DuplicateCurve();
                 contour.Translate(0.0, 0.0, z);
                 result.ContourCurves.Add(contour);
-                result.Frames.AddRange(SampleContourFrames(contour, framesPerLayer));
+                result.Frames.AddRange(SampleContourFrames(contour, frameSpacingMm));
 
                 // Infill: alternating ±45 per layer. Even layers (i=0,2,…)
                 // at +45°; odd layers at -45°. Stacked, this gives a
@@ -181,14 +183,20 @@ namespace CCL_Clay3DP.Core
         /// <summary>
         /// Sample a closed planar contour into frames suitable for the
         /// robot. Mirrors SkirtBuilder.SampleSkirtFrames: uniform arc
-        /// length, last sample coincides with first to close the loop,
-        /// frame YAxis = +Z so the build plate stays flat regardless
+        /// length at frameSpacingMm (sample count derived from perimeter
+        /// per Issue #22), last sample coincides with first to close the
+        /// loop, frame YAxis = +Z so the build plate stays flat regardless
         /// of the SpiralFollowsCurveNormal setting.
         /// </summary>
-        private static List<Plane> SampleContourFrames(Curve contour, int sampleCount)
+        private static List<Plane> SampleContourFrames(Curve contour, double frameSpacingMm)
         {
             var frames = new List<Plane>();
-            if (contour == null || sampleCount < 4) return frames;
+            if (contour == null || frameSpacingMm <= 0.0) return frames;
+
+            double perimeter = contour.GetLength();
+            if (perimeter <= 0.0) return frames;
+
+            int sampleCount = Math.Max(4, (int)Math.Ceiling(perimeter / frameSpacingMm));
 
             double[] ts = contour.DivideByCount(sampleCount, true);
             if (ts == null || ts.Length == 0) return frames;

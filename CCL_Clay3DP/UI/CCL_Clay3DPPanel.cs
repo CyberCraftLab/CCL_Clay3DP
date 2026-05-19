@@ -190,6 +190,7 @@ namespace CCL_Clay3DP.UI
         {
             "3DP::Contours",
             "3DP::Spiral Toolpath",
+            "3DP::Spiral Points",
             "3DP::Heatmap",
             "3DP::Outer Toolpath",
             "3DP::Bracing Outer Points",
@@ -653,13 +654,19 @@ namespace CCL_Clay3DP.UI
 
                 SetStatus($"Found {contours.Count} contours. Interpolating spiral...");
 
-                // 3) Generate spiral toolpath
+                // 3) Generate spiral toolpath. Brep + mesh are passed so
+                // the interpolator can re-slice internally for surface
+                // fidelity, independent of the user's print layer height
+                // (which is the spiral's helical pitch).
                 var spiralPoints = SpiralInterpolator.Interpolate(
                     contours,
-                    _settings.Helix.FramesPerLayer,
+                    _settings.Helix.FrameSpacingMm,
+                    _settings.Helix.LayerHeight,
                     _settings.Helix.StartAngle,
                     _settings.Helix.DirectionCCW,
-                    reportProgress);
+                    workingBrep,
+                    workingMesh,
+                    progress: reportProgress);
 
                 reportProgress(0.1);
                 SetStatus($"Computing {spiralPoints.Count} frames...");
@@ -722,7 +729,7 @@ namespace CCL_Clay3DP.UI
                     BakeSkirt(RhinoDoc.ActiveDoc, skirt);
                     _lastResult.SkirtCurve = skirt;
                     _lastResult.SkirtFrames = SkirtBuilder.SampleSkirtFrames(
-                        skirt, _settings.Helix.FramesPerLayer);
+                        skirt, _settings.Helix.FrameSpacingMm);
                 }
 
                 Rhino.UI.StatusBar.UpdateProgressMeter(100, true);
@@ -759,6 +766,25 @@ namespace CCL_Clay3DP.UI
                 attrs.LayerIndex = spiralLayer;
                 attrs.Name = "SpiralToolpath";
                 doc.Objects.AddCurve(result.SpiralCurve, attrs);
+            }
+
+            // Bake the raw toolpath points on a dedicated layer so the
+            // user can visually verify frame spacing and on-surface
+            // placement. Each ToolpathPoint becomes one point object —
+            // the gap between consecutive points equals FrameSpacingMm.
+            if (result.ToolpathPoints != null && result.ToolpathPoints.Count > 0)
+            {
+                int pointsLayer = EnsureLayer(doc, "3DP::Spiral Points",
+                    System.Drawing.Color.Yellow);
+                ClearLayerObjects(doc, "3DP::Spiral Points");
+
+                var pointAttrs = new ObjectAttributes
+                {
+                    LayerIndex = pointsLayer,
+                    Name = "SpiralPoint",
+                };
+                foreach (var pt in result.ToolpathPoints)
+                    doc.Objects.AddPoint(pt, pointAttrs);
             }
 
             doc.Views.Redraw();
@@ -1094,7 +1120,7 @@ namespace CCL_Clay3DP.UI
                 _settings.Base,
                 _settings.Helix.LayerHeight,
                 _settings.Clay.BeadDiameter,
-                _settings.Helix.FramesPerLayer);
+                _settings.Helix.FrameSpacingMm);
 
             if (baseResult.LayerCount == 0)
                 return (selection.Brep, selection.Mesh, null, 0.0);
@@ -1413,7 +1439,7 @@ namespace CCL_Clay3DP.UI
                     {
                         skirtNoBrace = SkirtBuilder.BuildSkirt(contours[0]);
                         skirtNoBraceFrames = SkirtBuilder.SampleSkirtFrames(
-                            skirtNoBrace, _settings.Helix.FramesPerLayer);
+                            skirtNoBrace, _settings.Helix.FrameSpacingMm);
                     }
                     BakeSkirt(RhinoDoc.ActiveDoc, skirtNoBrace);
 
@@ -1442,9 +1468,9 @@ namespace CCL_Clay3DP.UI
 
                 // Outer Wall Bracing: preview inward arrows so the user can
                 // flip the side before picking the offset distance. Contact-
-                // point count is decoupled from FramesPerLayer (Issue #11)
-                // so bracing density can be tuned independently of toolpath
-                // sampling. BracingContactPoints means "number of times the
+                // point count is decoupled from the spiral frame spacing
+                // (Issue #11) so bracing density can be tuned independently
+                // of toolpath sampling. BracingContactPoints means "number of times the
                 // bracing touches the wall" — we double it for the generator
                 // so each pair (outer-touch, inner-anchor) accounts for one
                 // wall contact, matching what the user counts by eye.
@@ -1587,7 +1613,7 @@ namespace CCL_Clay3DP.UI
                     BakeSkirt(RhinoDoc.ActiveDoc, skirtBraced);
                     _lastResult.SkirtCurve = skirtBraced;
                     _lastResult.SkirtFrames = SkirtBuilder.SampleSkirtFrames(
-                        skirtBraced, _settings.Helix.FramesPerLayer);
+                        skirtBraced, _settings.Helix.FrameSpacingMm);
                 }
 
                 SetStatus(WithTranslationNote(
