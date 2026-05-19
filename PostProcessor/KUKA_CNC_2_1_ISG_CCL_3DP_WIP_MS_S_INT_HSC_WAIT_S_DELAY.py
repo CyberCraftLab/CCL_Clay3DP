@@ -272,7 +272,7 @@ class RobotPost(object):
                 self.addline("#MCS ON")
             elif move_type == self.MOVE_TYPE_HSC:
                 # BSPLINE smoothing only wraps the curve-follow section
-                self.addline("#HSC ON [BSPLINE PATH_DEV 0.1000 TRACK_DEV 0.1000]")
+                self.addline("#HSC ON [BSPLINE PATH_DEV 0.5000 TRACK_DEV 0.5000]")
             # PTP doesn't require an explicit ON
             self.MoveType = move_type
     # --------- Helpers for Extruder OFF lead compensation ---------
